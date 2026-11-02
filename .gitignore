@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# game data and outputs: never commit these
+*.bfsar
+*.bfwav
+*.wav
+out/
+tables/
