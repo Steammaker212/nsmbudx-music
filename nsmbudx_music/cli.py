@@ -13,12 +13,14 @@ reverse-engineering/FindingsI/AUDIO.md):
     python -m nsmbudx_music <Sound.bfsar> extract <out_dir> [regex] [--wav]
     python -m nsmbudx_music <Sound.bfsar> inject <label> <layer|all> <in.wav|in.bfwav>
                             -o <out.bfsar> [--loop-start SAMPLES | --no-loop] [--silence-others]
+    python -m nsmbudx_music <Sound.bfsar> add <slot> <in.wav> -o <out.bfsar> [--fast] [--bpm N]
+    python -m nsmbudx_music <Sound.bfsar> remove <slot> -o <out.bfsar>
     python -m nsmbudx_music <Sound.bfsar> dump <out_dir>      # every table as CSV
 """
-import argparse, os, re, struct, sys, wave as wavmod
-import numpy as np
+import argparse, os, re, sys
 from .bfsar import Bfsar, dump_csv, summary
-from . import formats as F, fwav
+from . import edit, formats as F, fwav
+from .audio import estimate_bpm, read_wav, silent_wave, wav_to_fwav, write_wav
 
 # SndBgmMgr course music tables in main v1.0.0 (32-bit): {name, id} x 30, 1-based.
 # 0x60c28460 normal, 0x60c28370 _FAST, 0x60c28640 control _V, 0x60c28550 control _FAST_V.
@@ -29,6 +31,19 @@ COURSE_BGM = [None, "CHIJOU", "CHIKA", "WATER", "ATHLETIC", "OBAKE", "SABAKU", "
               "SHIRO_LAST", "DUMMY"]
 
 
+# What each course music is, for people.
+COURSE_NAMES = {
+    "CHIJOU": "Overworld", "CHIKA": "Underground", "WATER": "Underwater", "ATHLETIC": "Athletic",
+    "OBAKE": "Ghost House", "SABAKU": "Desert", "YUKI": "Snow", "KAZAN": "Volcano", "TORIDE": "Tower",
+    "SHIRO": "Castle", "HIKOUSEN": "Airship", "BONUS": "Bonus room", "ROAD_TO_LAST": "Final world",
+    "TORIDE_BOSS": "Tower boss", "SHIRO_BOSS": "Castle boss", "MINIGAME": "Minigame",
+    "HIKOUSEN_BOSS": "Airship boss", "MORI": "Forest", "MG_BTL": "Boost/coin battle",
+    "SANBASHI": "Beach", "KAZAN_TIKA": "Volcano cave", "SHADOW": "Shadow chase",
+    "STAFF_CREDIT": "Credits", "HIKOUSEN_ROUKA": "Airship corridor", "LAST_BOSS": "Bowser",
+    "LAST_BOSS2": "Bowser (2)", "LAST_BOSS2_HARP": "Bowser (harp)", "SHIRO_LAST": "Final castle",
+}
+
+
 def course_id(label):
     m = re.match(r"(?:STRM|WSD)_BGM_(.+?)(_FAST)?$", label)
     if m and m.group(1) in COURSE_BGM:
@@ -37,8 +52,8 @@ def course_id(label):
 
 
 class Music:
-    def __init__(self, path):
-        self.bf = Bfsar(path)
+    def __init__(self, source):
+        self.bf = Bfsar(source)
         self._war = {}
         self.wsd_by_sound = {}
 
@@ -93,45 +108,6 @@ class Music:
             yield s
 
 
-def write_wav(path, pcm, rate, loop_start=None, loop_end=None):
-    with wavmod.open(path, "wb") as w:
-        w.setnchannels(pcm.shape[1])
-        w.setsampwidth(2)
-        w.setframerate(rate)
-        w.writeframes(pcm.astype("<i2").tobytes())
-    if loop_start is not None:                 # append a 'smpl' chunk with the loop
-        smpl = struct.pack("<9I", 0, 0, int(1e9 / rate), 60, 0, 0, 0, 1, 0)
-        smpl += struct.pack("<6I", 0, 0, loop_start, loop_end - 1, 0, 0)
-        with open(path, "r+b") as f:
-            f.seek(0, 2)
-            f.write(b"smpl" + struct.pack("<I", len(smpl)) + smpl)
-            size = f.tell()
-            f.seek(4)
-            f.write(struct.pack("<I", size - 8))
-
-
-def read_wav(path):
-    """Returns (pcm (n, ch) int16, rate, loop_start or None).  Reads a 'smpl' loop if present."""
-    with open(path, "rb") as f:
-        raw = f.read()
-    assert raw[:4] == b"RIFF" and raw[8:12] == b"WAVE", "not a RIFF WAVE"
-    p, fmt, data, loop = 12, None, None, None
-    while p + 8 <= len(raw):
-        cid, size = raw[p:p + 4], struct.unpack_from("<I", raw, p + 4)[0]
-        body = raw[p + 8:p + 8 + size]
-        if cid == b"fmt ":
-            fmt = struct.unpack_from("<HHIIHH", body)
-        elif cid == b"data":
-            data = body
-        elif cid == b"smpl" and struct.unpack_from("<I", body, 28)[0] > 0:
-            loop = struct.unpack_from("<I", body, 36 + 8)[0]
-        p += 8 + size + (size & 1)
-    tag, ch, rate, _, _, bits = fmt
-    assert tag in (1, 0xFFFE) and bits == 16, "need 16-bit PCM WAV"
-    pcm = np.frombuffer(data, dtype="<i2").reshape(-1, ch)
-    return pcm, rate, loop
-
-
 def cmd_list(m, rx):
     print(f"{'label':34s} {'kind':4s} {'course':6s} layer           wavearc-file wave  ch  rate   loop      seconds  mixvol")
     for s in m.music_sounds(rx):
@@ -165,24 +141,12 @@ def cmd_extract(m, out, rx, as_wav):
 def load_input(path, loop_start, no_loop):
     if path.lower().endswith(".bfwav"):
         blob = open(path, "rb").read()
-        assert blob[:4] == b"FWAV", "not an FWAV"
+        if blob[:4] != b"FWAV":
+            sys.exit(f"{path}: not an FWAV")
         if blob[4:6] != b"\xff\xfe":
             sys.exit("big-endian (Wii U) BFWAV: convert it to little-endian/Switch first")
         return blob
-    pcm, rate, wav_loop = read_wav(path)
-    ls = None if no_loop else (loop_start if loop_start is not None else (wav_loop or 0))
-    if ls is not None and ls % 14:
-        pad = 14 - ls % 14                    # DSP loop starts sit on 14-sample frames
-        pcm = np.concatenate([np.zeros((pad, pcm.shape[1]), np.int16), pcm])
-        ls += pad
-    print(f"encoding {pcm.shape[0]} samples x {pcm.shape[1]} ch @ {rate} Hz, loop {ls} ...")
-    return fwav.Wave.from_pcm(pcm, rate, ls).build()
-
-
-def silent_wave(rate, channels):
-    """A 14-sample looping silent DSP wave: mutes a stem layer at almost no memory cost."""
-    w = fwav.Wave.from_pcm(np.zeros((14, channels), np.int16), rate, 0, workers=1)
-    return w.build()
+    return wav_to_fwav(path, loop_start, not no_loop)[0]
 
 
 def cmd_inject(m, label, layer, src, out, loop_start, no_loop, silence_others):
@@ -213,6 +177,27 @@ def cmd_inject(m, label, layer, src, out, loop_start, no_loop, silence_others):
     print(f"wrote {out} ({len(data):,} bytes)")
 
 
+def cmd_add(m, name, src, out, fast, bpm, loop_start, no_loop, volume):
+    label = edit.custom_label(name, fast)
+    if src.lower().endswith(".bfwav"):
+        blob = load_input(src, None, False)
+        rate_bpm = bpm or 120
+    else:
+        blob, pcm, rate = wav_to_fwav(src, loop_start, not no_loop)
+        rate_bpm = bpm or estimate_bpm(pcm, rate)
+    data = edit.add_music(m.bf, label, blob, rate_bpm, volume)
+    with open(out, "wb") as f:
+        f.write(data)
+    print(f"{label}: {os.path.basename(src)}, {rate_bpm} BPM -> {out} ({len(data):,} bytes)")
+
+
+def cmd_remove(m, name, out):
+    data = edit.remove_music(m.bf, edit.custom_label(name))
+    with open(out, "wb") as f:
+        f.write(data)
+    print(f"removed {edit.custom_label(name)} -> {out}")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("bfsar")
@@ -226,6 +211,15 @@ def main():
     p.add_argument("--loop-start", type=int); p.add_argument("--no-loop", action="store_true")
     p.add_argument("--silence-others", action="store_true",
                    help="replace this sound's other stem layers with silence")
+    p = sub.add_parser("add", help="add new music (CUSTOM_BGM_<slot>) for the Custom Music sprite")
+    p.add_argument("slot", help="slot number (0-99) or a full label"); p.add_argument("input")
+    p.add_argument("-o", "--out", required=True)
+    p.add_argument("--fast", action="store_true", help="the hurry-up version (CUSTOM_BGM_<slot>_FAST)")
+    p.add_argument("--bpm", type=int, help="tempo for the enemies' beat (default: estimated)")
+    p.add_argument("--volume", type=int, help="0-255 (default 90, like the title music)")
+    p.add_argument("--loop-start", type=int); p.add_argument("--no-loop", action="store_true")
+    p = sub.add_parser("remove", help="remove added music"); p.add_argument("slot")
+    p.add_argument("-o", "--out", required=True)
     a = ap.parse_args()
     m = Music(a.bfsar)
     if a.cmd == "list":
@@ -235,5 +229,9 @@ def main():
         print(summary(m.bf))
     elif a.cmd == "extract":
         cmd_extract(m, a.out, a.regex, a.wav)
+    elif a.cmd == "add":
+        cmd_add(m, a.slot, a.input, a.out, a.fast, a.bpm, a.loop_start, a.no_loop, a.volume)
+    elif a.cmd == "remove":
+        cmd_remove(m, a.slot, a.out)
     else:
         cmd_inject(m, a.label, a.layer, a.input, a.out, a.loop_start, a.no_loop, a.silence_others)

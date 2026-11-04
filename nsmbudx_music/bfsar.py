@@ -60,10 +60,14 @@ class Sound:
 
 
 class Bfsar:
-    def __init__(self, path):
-        self.path = path
-        with open(path, "rb") as f:
-            self.data = f.read()
+    def __init__(self, source):
+        """source: a file path, or the archive's bytes."""
+        if isinstance(source, (bytes, bytearray)):
+            self.path, self.data = None, bytes(source)
+        else:
+            self.path = source
+            with open(source, "rb") as f:
+                self.data = f.read()
         r = self.r = R(self.data)
         assert self.data[:4] == b"FSAR", "not an FSAR"
         assert r.u16(4) == 0xFEFF, "big-endian FSAR not supported"
