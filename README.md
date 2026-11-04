@@ -1,8 +1,12 @@
 # nsmbudx-music
 
-List, extract and replace the music in *New Super Mario Bros. U Deluxe* (Switch,
-v1.0.0). Works directly on the game's `romfs/Sound/Sound.bfsar`: no hard-coded
-offsets, and a new song can be any length.
+List, extract, replace and **add** music in *New Super Mario Bros. U Deluxe* (Switch,
+v1.0.0), from the command line or a small editor window. Works directly on the game's
+`romfs/Sound/Sound.bfsar`: no hard-coded offsets, and a new song can be any length.
+
+Added music plays in levels through the Custom Music sprite (785) of
+[nsmbud-reverse](https://github.com/Steammaker212/nsmbud-reverse), with rules such as
+"only while time is not running low" or "not while riding Yoshi".
 
 No game files are included. You need your own dump of the game's romfs.
 
@@ -34,6 +38,25 @@ pip install -r requirements.txt
 ```
 
 Run everything from this folder as `python -m nsmbudx_music ...`.
+
+## The editor
+
+```
+python -m nsmbudx_music.gui
+python -m nsmbudx_music.gui Sound.bfsar
+```
+
+Open `Sound.bfsar`, then pick a sound (or one of its layers) in the list:
+
+- **Play** decodes it and opens it in your default player. Double-clicking does the same.
+- **Export WAV / Export BFWAV** saves it.
+- **Replace** swaps in a WAV or BFWAV. For a song with several layers, it can silence the others.
+- **Add music** adds a new song in a slot (`CUSTOM_BGM_00` to `CUSTOM_BGM_99`), or its
+  hurry-up version (`CUSTOM_BGM_nn_FAST`).
+- **Remove** takes an added song out again. Added songs are shown in blue.
+- **Save As** writes the archive. Nothing is written before that.
+
+Changes are made in memory, and each takes a few seconds (encoding a long WAV takes longer).
 
 ## Usage
 
@@ -74,14 +97,50 @@ python -m nsmbudx_music Sound.bfsar inject STRM_BGM_CHIJOU track1 mysong.wav --s
 python -m nsmbudx_music Sound.new.bfsar inject STRM_BGM_CHIJOU_FAST track1 mysong_fast.wav --silence-others -o Sound.new2.bfsar
 ```
 
-- Input is a 16-bit PCM WAV (mono or stereo, any sample rate; 48000 Hz like the
-  game is best) or a little-endian BFWAV.
+- Input is a WAV (8/16/24/32-bit or float, mono or stereo, any sample rate; 48000 or
+  44100 Hz like the game's own) or a little-endian BFWAV.
 - The loop start comes from the WAV's `smpl` chunk, as written by most audio
   editors. Override it with `--loop-start SAMPLES`, or use `--no-loop` for jingles.
 - `--silence-others` replaces the sound's other layers with a short silent wave.
   Use it when your song is one finished mix.
 - `all` instead of `track1` puts the same file in every layer.
 - The output is a complete `Sound.bfsar`. Only the changed wave archive differs from the input.
+
+### Add new music
+
+```
+python -m nsmbudx_music Sound.bfsar add 0 mysong.wav -o Sound.new.bfsar
+python -m nsmbudx_music Sound.new.bfsar add 0 --fast mysong_fast.wav -o Sound.new2.bfsar
+python -m nsmbudx_music Sound.new2.bfsar remove 0 -o Sound.new3.bfsar
+```
+
+`add 0` stores the song as `CUSTOM_BGM_00`, the label the Custom Music sprite plays for
+slot 0. `--fast` adds the version for when time runs low. Adding a slot again replaces
+it. Options:
+
+- `--bpm N` sets the tempo the enemies hop to. By default it is estimated from the song;
+  set it when the estimate is off (it may find half or double the real tempo).
+- `--loop-start`, `--no-loop` and the input formats work as in `inject`.
+- `--volume` is 0-255; the default (90) matches the title music.
+
+The game loads the whole archive into its sound memory. The nsmbud-reverse code makes
+that memory bigger by what you add, taken from the game's other memory, so keep added
+music to a few minutes in total. A 98-second stereo song adds about 5 MB.
+
+### Use it in a level
+
+With the nsmbud-reverse mod installed, place a **Custom Music** sprite (785) anywhere in an area
+(Yaz0moto, the steam-dx patch, "Level Controllers"):
+
+| Setting | |
+|---|---|
+| Slot | 0-99: plays `CUSTOM_BGM_nn` |
+| Keep playing when time runs low | plays `CUSTOM_BGM_nn_FAST` if you added one, else the same song. Off: the area's own hurry-up music |
+| Keep playing while riding Yoshi | off: the area's own music, with Yoshi's drums |
+| Keep playing while carrying a Baby Yoshi | off: the area's own music, with the Baby Yoshi chorus |
+| Event | plays only while this event is on (0 = always) |
+
+When the song should stop (Yoshi, time, event), the area's own music fades in, and back.
 
 ### Install
 
@@ -117,9 +176,10 @@ Writes `sounds.csv`, `files.csv`, `banks.csv`, `wavearcs.csv`, `groups.csv`,
 
 ## Limitations
 
-- **Not yet tested in game.** Output archives are checked structurally: they
-  re-parse, decode, keep valid loop data, and leave every other file byte-identical.
-- The beat map keeps the original song's tempo, so enemies hop to the old beat.
+- Replacing music works in game. Added music is tested to boot (Ryujinx) with a
+  98-second song; playing it in a level has not been checked yet.
+- A replaced course song keeps the original's beat map, so enemies hop to the old beat.
+  Added songs use their BPM.
 - Course music is loaded into memory rather than streamed. Very long songs may not fit
   the game's sound heap; the original layers are 40-90 s each.
 - Wii U (big-endian) BFWAVs are refused. Convert them first, or give a WAV.
@@ -131,8 +191,8 @@ pip install pytest
 python -m pytest tests
 ```
 
-The codec tests need nothing. The archive tests run when `NSMBUDX_BFSAR` points
-at a v1.0.0 `Sound.bfsar`.
+The codec, WAV and label-tree tests need nothing. The archive tests run when
+`NSMBUDX_BFSAR` points at a v1.0.0 `Sound.bfsar`.
 
 ## Credits
 
