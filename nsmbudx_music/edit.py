@@ -8,7 +8,10 @@ a fresh string table and patricia tree; FILE is laid out as in fwav.rebuild_bfsa
 
 New music is added as a wave sound (WSD), the kind the game already uses for
 airship and boss music: one FWSD file with one wave sound, one wave archive with
-one wave, and a wave sound set covering the new sound.
+one wave, and a wave sound set covering the new sound. The new files and the set
+are listed in GROUP_BOOT: the game plays a wave sound only when its wave archive
+belongs to a group it has loaded (otherwise StartSound fails with "wave archive
+not loaded"), and GROUP_BOOT is loaded at boot and never unloaded.
 """
 import struct
 
@@ -19,6 +22,7 @@ SECTION_TYPES = [0x2100, 0x2104, 0x2101, 0x2103, 0x2105, 0x2102, 0x2106]
 SOUND, SOUNDSET, BANK, WAVEARC, GROUP, PLAYER, FILE = range(7)
 ITEM_TYPE = {SOUND: 1, SOUNDSET: 2, BANK: 3, PLAYER: 4, WAVEARC: 5, GROUP: 6}
 NO_STRING = 0xFFFFFFFF
+HOME_GROUP = "GROUP_BOOT"
 # template for new music: a looping two-channel BGM wave sound
 TEMPLATE = "STRM_BGM_TITLE"
 
@@ -108,6 +112,8 @@ class Editor:
                 raise ValueError("not the v1.0.0 Sound.bfsar: fewer items than the game's own")
             self.sections[k] = self.sections[k][:n]
         self.files = self.files[:VANILLA[FILE]]
+        gid = self._group_file(HOME_GROUP)
+        self.files[gid] = build_fgrp(*_strip_group(*parse_fgrp(self.files[gid])))
         self.strings = self.strings[:VANILLA_STRINGS]
         self.string_items = {i: v for i, v in self.string_items.items() if i < VANILLA_STRINGS}
 
@@ -159,9 +165,16 @@ class Editor:
         # sound set cloned from the template's set: one sound, one file, one wave archive
         self.sections[SOUNDSET].append(self._single_soundset(tpl_set, sound_id, wsd_file, war_id))
         self.add_string("WSDSET_" + label, set_id)
+        group_id = next(g["id"] for g in bf.groups if g["label"] == HOME_GROUP)
         while len(self.sections[FILE]) < len(self.files):
-            self.sections[FILE].append(new_file_info())
+            self.sections[FILE].append(new_file_info([group_id]))
+        gid = self._group_file(HOME_GROUP)
+        items, sets = parse_fgrp(self.files[gid])
+        self.files[gid] = build_fgrp(items + [war_file, wsd_file], sets + [(set_id, 1)])
         return sound_id
+
+    def _group_file(self, label):
+        return next(g["file"] for g in self.bf.groups if g["label"] == label)
 
     def _set_option(self, chunk, at, bit, value):
         flags, = struct.unpack_from("<I", chunk, at)
@@ -286,14 +299,68 @@ class Editor:
 
 
 
-def new_file_info():
-    """FileInfo of an internal file in no group; build() fills in offset and size.
+def new_file_info(groups=()):
+    """FileInfo of an internal file; build() fills in offset and size.
 
     Same shape as the game's: Ref(0x220C) to an internal location 4 bytes on,
-    {Ref(0x1F00) offset in FILE, u32 size, Ref(0x0100) attached group table}.
+    {Ref(0x1F00) offset in FILE, u32 size, Ref(0x0100) table of the groups it is in}.
     """
     return (struct.pack("<Hxxi", 0x220C, 12) + b"\0" * 4 +
-            struct.pack("<HxxiIHxxiI", 0x1F00, 0, 0, 0x0100, 0x14, 0))
+            struct.pack("<HxxiIHxxi", 0x1F00, 0, 0, 0x0100, 0x14) +
+            struct.pack("<I", len(groups)) + b"".join(struct.pack("<I", g) for g in groups))
+
+
+# --- FGRP --------------------------------------------------------------------
+def parse_fgrp(blob):
+    """([file ids], [(item id, load flags)]) of a group with no embedded files.
+
+    INFO (0x7800) lists the files: {u32 file id, Ref(0, -1), u32 -1} each. INFX (0x7802)
+    lists the sound sets / banks the group stands for: {u32 item id, u32 load flags}.
+    """
+    r, b = R(blob), F.blocks(blob)
+    info = b[0x7800][0] + 8
+    items = []
+    for _, o in r.ref_table(info):
+        if r.s32(o + 8) != -1:
+            raise ValueError("group embeds files; not supported")
+        items.append(r.u32(o))
+    infx = b[0x7802][0] + 8
+    sets = [(r.u32(o), r.u32(o + 4)) for _, o in r.ref_table(infx)]
+    return items, sets
+
+
+def _strip_group(items, sets):
+    """Drop what add_wave_music put in a group."""
+    return ([f for f in items if f < VANILLA[FILE]],
+            [(i, f) for i, f in sets
+             if not (i >> 24 == ITEM_TYPE[SOUNDSET] and (i & 0xFFFFFF) >= VANILLA[SOUNDSET])])
+
+
+def build_fgrp(items, sets):
+    """FGRP in the game's layout: INFO padded to 0x20, the empty FILE block up to the next
+    0x40, INFX padded to 0x40 in the header but stored only up to its data."""
+    def table(ref_type, entries, size):
+        body = struct.pack("<I", len(entries))
+        first = 4 + 8 * len(entries)
+        body += b"".join(struct.pack("<Hxxi", ref_type, first + size * k) for k in range(len(entries)))
+        return body + b"".join(entries)
+
+    info = table(0x7900, [struct.pack("<IHxxiI", f, 0, -1, 0xFFFFFFFF) for f in items], 16)
+    infx = table(0x7901, [struct.pack("<II", i, f) for i, f in sets], 8)
+    info_block = b"INFO" + struct.pack("<I", align(8 + len(info), 0x20)) + info
+    info_block += b"\0" * (align(len(info_block), 0x20) - len(info_block))
+    info_off = 0x40
+    file_off = info_off + len(info_block)
+    infx_off = align(file_off + 8, 0x40)
+    file_block = b"FILE" + struct.pack("<I", infx_off - file_off) + b"\0" * (infx_off - file_off - 8)
+    infx_size = align(8 + len(infx), 0x40)
+    infx_block = b"INFX" + struct.pack("<I", infx_size) + infx
+    hdr = struct.pack("<4sHHIIHH", b"FGRP", 0xFEFF, 0x40, 0x00010000, infx_off + infx_size, 3, 0)
+    hdr += struct.pack("<HHiI", 0x7800, 0, info_off, len(info_block))
+    hdr += struct.pack("<HHiI", 0x7801, 0, file_off, len(file_block))
+    hdr += struct.pack("<HHiI", 0x7802, 0, infx_off, infx_size)
+    hdr += b"\0" * (0x40 - len(hdr))
+    return hdr + info_block + file_block + infx_block
 
 
 # v1.0.0's own item counts. Everything after them was added by add_wave_music.

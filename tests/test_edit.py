@@ -58,8 +58,14 @@ def test_add_and_remove_music():
     assert s.label == "CUSTOM_BGM_07" and s.kind == "WSD"
     (_, wavearc, index, _), = m.layers(s)
     assert m.war(wavearc)[1][index] == wave
-    # the game's own items are untouched
-    assert all(added.file_bytes(i) == bf.file_bytes(i) for i in range(len(bf.files)))
+    # the game's own files are untouched, except GROUP_BOOT, which now lists the new ones
+    boot = next(g["file"] for g in bf.groups if g["label"] == "GROUP_BOOT")
+    assert all(added.file_bytes(i) == bf.file_bytes(i) for i in range(len(bf.files)) if i != boot)
+    files, sets = edit.parse_fgrp(added.file_bytes(boot))
+    old_files, old_sets = edit.parse_fgrp(bf.file_bytes(boot))
+    assert files == old_files + [len(bf.files), len(bf.files) + 1]
+    assert sets == old_sets + [(added.soundsets[-1]["id"], 1)]
+    assert added.files[-1]["groups"] == [next(g["id"] for g in bf.groups if g["label"] == "GROUP_BOOT")]
     # adding the same label again replaces it; removing gives the game's archive back
     again = Bfsar(edit.add_music(added, "CUSTOM_BGM_07", wave, bpm=90))
     assert [m[0] for m in edit.custom_music(again)] == ["CUSTOM_BGM_07"]
