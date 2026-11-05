@@ -8,3 +8,6 @@ __pycache__/
 *.wav
 out/
 tables/
+build/
+dist/
+*.spec
