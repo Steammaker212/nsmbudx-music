@@ -100,6 +100,49 @@ however long the level lasts.
   (or 127) before adding it; a small error is pulled back into step at every loop.
 - The tempo should not change during the song.
 
+### Placing the bahs yourself
+
+By default the hop comes on beat 3 of every fourth bar. To make the enemies hop where
+your song actually has its accents (a shout, a drum hit, the end of a phrase), give a
+**bah times file**: one hop per line, the time in seconds from the start of the WAV,
+then optionally the kind of hop (1-4, default 3).
+
+```
+# bahs.txt: seconds  kind
+5.43
+12.10  3
+19.86  2
+26.20  1
+26.50  4
+```
+
+With a file, only these hops are used (the every-fourth-bar ones are dropped); the
+steady beat keeps coming from the BPM and first beat.
+
+The easiest way to make one is in Audacity:
+
+1. Open the WAV and play it.
+2. Press **Ctrl+M** (Add Label at Playback Position) at each spot the enemies should hop.
+   Type a kind (1-4) as the label text if you like, or leave it empty for 3.
+3. **File > Export > Export Labels...** and save the `.txt`.
+
+Then add the song with it:
+
+```
+nsmbudx-music Sound.bfsar add 0 mysong.wav --bahs bahs.txt -o Sound.new.bfsar
+```
+
+In the editor, choose the file in **Bah times file**.
+
+- Times are in the song as you hear it. Hops in the intro (before the loop start) happen
+  once; hops in the loop body happen every time round.
+- The kinds are the values the game's own songs use. The overworld uses 3 for a single
+  "bah", and 1 followed by 4 three-quarters of a beat later for "bah-bah"; the
+  underground uses 2. Try them in game to see which looks right.
+- Times snap to the beat track's grid (1/96 of a beat, about 5 ms at 120 BPM).
+- The hops are stored in the archive with the song, so adding or removing other songs
+  later keeps them. Adding the same slot again builds the song anew: pass the file again.
+
 The tool prints what it used:
 
 ```

@@ -131,6 +131,9 @@ it. Options:
 - `--bpm N` and `--offset SECONDS` set the tempo and the first beat the enemies dance to.
   By default both are estimated from the song; set them when the hops are off (see the
   [guide](docs/custom-music-guide.md#4-getting-the-enemies-to-dance-on-the-beat)).
+- `--bahs FILE` places the enemies' hops at the times in FILE (`seconds [kind]` per line,
+  or an Audacity label export) instead of every fourth bar
+  ([how](docs/custom-music-guide.md#placing-the-bahs-yourself)).
 - `--loop-start`, `--no-loop` and the input formats work as in `inject`.
 - `--volume` is 0-255; the default (80) matches the overworld music.
 
@@ -192,8 +195,8 @@ Writes `sounds.csv`, `files.csv`, `banks.csv`, `wavearcs.csv`, `groups.csv`,
 - Replacing and adding music are tested in game (Ryujinx) with a 98-second song.
 - A replaced course song keeps the original's beat map, so enemies hop to the old beat.
   Added songs use their BPM and first beat.
-- An added song's "bah" hop falls on beat 3 of every fourth bar, not where the song
-  itself would shout; the game's own songs have theirs placed by hand.
+- Without `--bahs`, an added song's hop falls on beat 3 of every fourth bar, not where
+  the song itself would shout.
 - Course music is loaded into memory rather than streamed. Very long songs may not fit
   the game's sound heap; the original layers are 40-90 s each.
 - Wii U (big-endian) BFWAVs are refused. Convert them first, or give a WAV.
