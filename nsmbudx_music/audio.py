@@ -73,21 +73,37 @@ def read_wav(path):
     return pcm.reshape(-1, ch), rate, loop
 
 
-def estimate_bpm(pcm, rate, lo=70, hi=180):
-    """Rough tempo from the onset envelope's autocorrelation: good enough for beat sync."""
+def estimate_beat(pcm, rate, bpm=None, lo=90, hi=180):
+    """(BPM, seconds to the first beat) from the onset envelope.
+
+    The tempo is the beat period whose multiples (1-4 beats) line up best with the
+    envelope's autocorrelation, which keeps it on the beat rather than on a triplet or
+    half-beat; the offset is the phase whose beats land on the most onsets. Pass `bpm`
+    to keep a known tempo and only find the offset.
+    """
+    fps = 200                                          # envelope frames a second
     mono = pcm.astype(np.float64).mean(axis=1)
-    hop = rate // 100                                  # 100 envelope frames a second
+    hop = rate // fps
     n = len(mono) // hop
-    if n < 400:
-        return 120
+    if n < 4 * fps:
+        return bpm or 120, 0.0
     energy = np.log1p((mono[:n * hop].reshape(n, hop) ** 2).sum(axis=1))
     onset = np.maximum(np.diff(energy), 0)
-    onset -= onset.mean()
-    spec = np.fft.rfft(onset, 2 * len(onset))
-    ac = np.fft.irfft(spec * np.conj(spec))[:len(onset)]
-    lags = np.arange(int(6000 / hi), int(6000 / lo) + 1)
-    best = lags[np.argmax(ac[lags])]
-    return int(round(6000 / best))
+    if bpm is None:
+        centered = onset - onset.mean()
+        spec = np.fft.rfft(centered, 2 * len(centered))
+        ac = np.fft.irfft(spec * np.conj(spec))[:len(centered)]
+        lags = np.arange(int(60 * fps / hi), int(60 * fps / lo) + 1)
+        score = [sum(ac[k * l] for k in range(1, 5) if k * l < len(ac)) for l in lags]
+        bpm = int(round(60 * fps / lags[int(np.argmax(score))]))
+    period = 60 * fps / bpm
+    beats = np.arange(int((len(onset) - period) / period)) * period
+    phase = max(range(int(period)), key=lambda p: onset[(beats + p).astype(int)].sum())
+    return bpm, (phase + 1) / fps                      # onset[i] is the rise into frame i + 1
+
+
+def estimate_bpm(pcm, rate):
+    return estimate_beat(pcm, rate)[0]
 
 
 def wav_to_fwav(path, loop_start=None, loop=True, log=print):

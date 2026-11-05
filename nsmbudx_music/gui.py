@@ -13,7 +13,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from . import edit, formats as F, fwav
-from .audio import estimate_bpm, silent_wave, wav_to_fwav, write_wav
+from .audio import estimate_beat, silent_wave, wav_to_fwav, write_wav
 from .cli import COURSE_BGM, COURSE_NAMES, Music, course_id
 
 TITLE = "nsmbudx-music"
@@ -33,6 +33,7 @@ class AddDialog(simpledialog.Dialog):
         self.fast = tk.BooleanVar()
         self.path = tk.StringVar()
         self.bpm = tk.StringVar(value="auto")
+        self.offset = tk.StringVar(value="auto")
         self.loop = tk.StringVar()
         self.noloop = tk.BooleanVar()
         rows = [
@@ -40,6 +41,7 @@ class AddDialog(simpledialog.Dialog):
             ("", ttk.Checkbutton(f, text="Hurry-up version (CUSTOM_BGM_nn_FAST)", variable=self.fast)),
             ("WAV file", ttk.Entry(f, textvariable=self.path, width=48)),
             ("BPM", ttk.Entry(f, textvariable=self.bpm, width=8)),
+            ("First beat (seconds)", ttk.Entry(f, textvariable=self.offset, width=8)),
             ("Loop start (samples)", ttk.Entry(f, textvariable=self.loop, width=12)),
             ("", ttk.Checkbutton(f, text="Play once (no loop)", variable=self.noloop)),
         ]
@@ -48,7 +50,7 @@ class AddDialog(simpledialog.Dialog):
             w.grid(row=r, column=1, sticky="w", padx=4, pady=3)
         ttk.Button(f, text="Browse...", command=self.browse).grid(row=2, column=2, padx=4)
         ttk.Label(f, foreground="gray", wraplength=420, justify="left", text=(
-            "BPM drives the enemies' beat; 'auto' estimates it. Leave the loop start empty to use "
+            "BPM and the first beat drive the enemies' dance; 'auto' estimates them. Leave the loop start empty to use "
             "the WAV's own loop, or loop the whole song.")).grid(row=len(rows), column=0, columnspan=3,
                                                                   sticky="w", padx=4, pady=6)
         return rows[2][1]
@@ -72,6 +74,12 @@ class AddDialog(simpledialog.Dialog):
         if bpm not in ("", "auto") and not bpm.isdigit():
             messagebox.showerror(TITLE, "BPM is a number, or 'auto'.", parent=self)
             return False
+        offset = self.offset.get().strip()
+        try:
+            offset = None if offset in ("", "auto") else float(offset)
+        except ValueError:
+            messagebox.showerror(TITLE, "The first beat is a time in seconds, or 'auto'.", parent=self)
+            return False
         if loop and not loop.isdigit():
             messagebox.showerror(TITLE, "The loop start is a sample number.", parent=self)
             return False
@@ -79,6 +87,7 @@ class AddDialog(simpledialog.Dialog):
             "label": edit.custom_label(slot, self.fast.get()),
             "path": self.path.get(),
             "bpm": int(bpm) if bpm.isdigit() else None,
+            "offset": offset,
             "loop_start": int(loop) if loop else None,
             "loop": not self.noloop.get(),
         }
@@ -344,8 +353,8 @@ class App(tk.Tk):
                 new = wav_to_fwav(src, log=lambda *_: None)[0]
             if s.label in self.custom:
                 old = edit.custom_music(music.bf)
-                return edit.set_custom_music(music.bf, [(l, new if l == s.label else w, b, v)
-                                                        for l, w, b, v in old])
+                return edit.set_custom_music(music.bf, [(l, new if l == s.label else w, b, v, o)
+                                                        for l, w, b, v, o in old])
             info = F.fwav_info(new)
             plan = [(layer, new)]
             if mute:
@@ -371,8 +380,10 @@ class App(tk.Tk):
 
         def make():
             blob, pcm, rate = wav_to_fwav(r["path"], r["loop_start"], r["loop"], log=lambda *_: None)
-            bpm = r["bpm"] or estimate_bpm(pcm, rate)
-            return edit.add_music(bf, r["label"], blob, bpm)
+            bpm, offset = estimate_beat(pcm, rate, r["bpm"])
+            if r["offset"] is not None:
+                offset = r["offset"]
+            return edit.add_music(bf, r["label"], blob, bpm, offset=offset)
         self.apply(f"Adding {r['label']}", make)
 
     def remove(self):
