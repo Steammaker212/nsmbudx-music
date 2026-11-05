@@ -170,7 +170,7 @@ class Editor:
             self.sections[FILE].append(new_file_info([group_id]))
         gid = self._group_file(HOME_GROUP)
         items, sets = parse_fgrp(self.files[gid])
-        self.files[gid] = build_fgrp(items + [war_file, wsd_file], sets + [(set_id, 1)])
+        self.files[gid] = build_fgrp(items + [war_file, wsd_file], sets + [(set_id, 0xFFFFFFFF)])
         return sound_id
 
     def _group_file(self, label):

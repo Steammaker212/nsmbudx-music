@@ -64,7 +64,7 @@ def test_add_and_remove_music():
     files, sets = edit.parse_fgrp(added.file_bytes(boot))
     old_files, old_sets = edit.parse_fgrp(bf.file_bytes(boot))
     assert files == old_files + [len(bf.files), len(bf.files) + 1]
-    assert sets == old_sets + [(added.soundsets[-1]["id"], 1)]
+    assert sets == old_sets + [(added.soundsets[-1]["id"], 0xFFFFFFFF)]
     assert added.files[-1]["groups"] == [next(g["id"] for g in bf.groups if g["label"] == "GROUP_BOOT")]
     # adding the same label again replaces it; removing gives the game's archive back
     again = Bfsar(edit.add_music(added, "CUSTOM_BGM_07", wave, bpm=90))
