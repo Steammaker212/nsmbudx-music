@@ -134,12 +134,14 @@ class Editor:
         return (ITEM_TYPE[section] << 24) | len(self.sections[section])
 
     # --- new music -------------------------------------------------------
-    def add_seq_music(self, label, fwav, bpm, volume=None, offset=0.0, template=TEMPLATE):
+    def add_seq_music(self, label, fwav, bpm, volume=None, offset=0.0, bahs=None, seq=None,
+                      template=TEMPLATE):
         """Add `label` as a sequence sound playing `fwav`, like the game's own course music.
 
         Track 0 of the new sequence is a silent beat map at `bpm` (the enemies' "bah"), track 1
-        plays the song through a one-wave bank. `offset` is the first beat in seconds.
-        Returns the sound id.
+        plays the song through a one-wave bank. `offset` is the first beat in seconds,
+        `bahs` the hops [(seconds, kind)] (default: every fourth bar). `seq` reuses a beat
+        track built before (from custom_music). Returns the sound id.
         """
         from .fwav import build_fwar
         bf = self.bf
@@ -152,8 +154,11 @@ class Editor:
 
         info = F.fwav_info(fwav)
         loop = info["loop_start"] if info["loop"] else None
-        seq, start = build_beat_seq(label, bpm, info["samples"] / info["rate"],
-                                    None if loop is None else loop / info["rate"], offset)
+        if seq is None:
+            seq, start = build_beat_seq(label, bpm, info["samples"] / info["rate"],
+                                        None if loop is None else loop / info["rate"], offset, bahs)
+        else:
+            start = F.fseq_labels(seq)[label]
         war_file = self.add_file(build_fwar([fwav]))
         bank_file = self.add_file(self._one_wave_bank(bf.banks[tpl_bank]["file"], war_id))
         seq_file = self.add_file(seq)
@@ -328,12 +333,13 @@ def _u24(n):
     return n.to_bytes(3, "little")
 
 
-def build_beat_seq(label, bpm, length, loop=None, offset=0.0):
+def build_beat_seq(label, bpm, length, loop=None, offset=0.0, bahs=None):
     """FSEQ for added music: (file bytes, start offset of `label` in DATA).
 
     Track 0 is silent and only writes BEAT_PATTERN at `bpm` over the song's `length`
     seconds, from the first beat at `offset` seconds, jumping back to `loop` seconds at
-    the end, so it stays on the song's beat.
+    the end, so it stays on the song's beat. `bahs` [(seconds, kind 1-4)] puts the hops
+    (variable 0) at those times in the song instead of BEAT_PATTERN's.
     Track 1 plays program 0 note 60 forever (the song itself, through the bank), and
     the start code opens track 1 and runs track 0, like the game's own course music.
     """
@@ -342,10 +348,16 @@ def build_beat_seq(label, bpm, length, loop=None, offset=0.0):
     tick = lambda s: round(s * bpm * TIMEBASE / 60)
     end, loop_at, first = max(tick(length), 1), tick(loop or 0), tick(offset)
     sets = {}
+    pattern = BEAT_PATTERN if bahs is None else [e for e in BEAT_PATTERN if e[1] != 0]
     for k in range(first, end, BEAT_PERIOD):
-        for t, var, val in BEAT_PATTERN:
+        for t, var, val in pattern:
             if t + k < end:
                 sets.setdefault(t + k, []).append((var, val))
+    for when, kind in bahs or ():
+        if not 1 <= kind <= 4:
+            raise ValueError(f"bah kind {kind}: use 1-4")
+        if tick(when) < end:
+            sets.setdefault(tick(when), []).append((0, kind))
     events = sorted(set(sets) | {loop_at, end})
 
     data = bytearray(b"\xb0\x60\xc7\x00\xe1" + struct.pack("<H", bpm) + b"\xc1\x00")
@@ -462,40 +474,58 @@ def beat_offset(seq, bpm):
         p += 1
 
 
+def parse_bahs(text):
+    """Bah times from text: one per line, `seconds [kind]`, or an Audacity label export
+    (`start<TAB>end<TAB>label`, the label being the kind). Kind defaults to 3."""
+    out = []
+    for line in text.splitlines():
+        parts = line.replace(",", " ").split()
+        if not parts or parts[0].startswith("#"):
+            continue
+        kind = next((int(p) for p in parts[1:] if p.isdigit()), 3)
+        out.append((float(parts[0]), kind))
+    return out
+
+
 def custom_music(bf):
-    """[(label, fwav bytes, bpm, volume, first beat seconds)] of the music added to `bf`."""
+    """[(label, fwav bytes, bpm, volume, first beat seconds, beat track FSEQ or None)]
+    of the music added to `bf`."""
     out = []
     for s in bf.sounds[VANILLA[SOUND]:]:
         if s.kind == "SEQ":
             bank = bf.banks[s.detail["banks"][0] & 0xFFFFFF]
             war_id, index = F.fbnk_waves(bf.file_bytes(bank["file"]))[0]
-            offset = beat_offset(bf.file_bytes(s.file_id), s.options.get(31, 120))
+            seq = bf.file_bytes(s.file_id)
+            offset = beat_offset(seq, s.options.get(31, 120))
         elif s.kind == "WSD":      # added by older versions
             war_id, index = F.fwsd_sound_waves(bf.file_bytes(s.file_id), s.detail["index"])[0]
-            offset = 0.0
+            offset, seq = 0.0, None
         else:
             continue
         war = bf.file_bytes(bf.wavearcs[war_id & 0xFFFFFF]["file"])
         off, size = F.fwar_entries(war)[index]
-        out.append((s.label, war[off:off + size], s.options.get(31, 0) or 120, s.volume, offset))
+        out.append((s.label, war[off:off + size], s.options.get(31, 0) or 120, s.volume, offset, seq))
     return out
 
 
 def set_custom_music(bf, music):
-    """Archive bytes with exactly `music` [(label, fwav, bpm, volume, offset)] as the added music."""
+    """Archive bytes with exactly `music` (as custom_music gives it) as the added music."""
     ed = Editor(bf)
     ed.truncate_to_vanilla()
-    for label, fwav, bpm, volume, offset in music:
-        ed.add_seq_music(label, fwav, bpm, volume, offset)
+    for label, fwav, bpm, volume, offset, seq in music:
+        ed.add_seq_music(label, fwav, bpm, volume, offset, seq=seq)
     return ed.build()
 
 
-def add_music(bf, label, fwav, bpm, volume=None, offset=0.0):
+def add_music(bf, label, fwav, bpm, volume=None, offset=0.0, bahs=None):
     """Archive bytes with `label` added, or replaced if it was added before."""
     music = [m for m in custom_music(bf) if m[0] != label]
     if label in bf.strings and label not in [m[0] for m in custom_music(bf)]:
         raise ValueError(f"{label} is one of the game's own sounds; use inject to replace it")
-    return set_custom_music(bf, music + [(label, fwav, bpm, volume, offset)])
+    info = F.fwav_info(fwav)
+    seq, _ = build_beat_seq(label, bpm, info["samples"] / info["rate"],
+                            info["loop_start"] / info["rate"] if info["loop"] else None, offset, bahs)
+    return set_custom_music(bf, music + [(label, fwav, bpm, volume, offset, seq)])
 
 
 def remove_music(bf, label):

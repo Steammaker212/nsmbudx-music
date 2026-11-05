@@ -34,6 +34,7 @@ class AddDialog(simpledialog.Dialog):
         self.path = tk.StringVar()
         self.bpm = tk.StringVar(value="auto")
         self.offset = tk.StringVar(value="auto")
+        self.bahs = tk.StringVar()
         self.loop = tk.StringVar()
         self.noloop = tk.BooleanVar()
         rows = [
@@ -42,6 +43,7 @@ class AddDialog(simpledialog.Dialog):
             ("WAV file", ttk.Entry(f, textvariable=self.path, width=48)),
             ("BPM", ttk.Entry(f, textvariable=self.bpm, width=8)),
             ("First beat (seconds)", ttk.Entry(f, textvariable=self.offset, width=8)),
+            ("Bah times file", ttk.Entry(f, textvariable=self.bahs, width=48)),
             ("Loop start (samples)", ttk.Entry(f, textvariable=self.loop, width=12)),
             ("", ttk.Checkbutton(f, text="Play once (no loop)", variable=self.noloop)),
         ]
@@ -49,9 +51,12 @@ class AddDialog(simpledialog.Dialog):
             ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", padx=4, pady=3)
             w.grid(row=r, column=1, sticky="w", padx=4, pady=3)
         ttk.Button(f, text="Browse...", command=self.browse).grid(row=2, column=2, padx=4)
+        ttk.Button(f, text="Browse...", command=self.browse_bahs).grid(row=5, column=2, padx=4)
         ttk.Label(f, foreground="gray", wraplength=420, justify="left", text=(
-            "BPM and the first beat drive the enemies' dance; 'auto' estimates them. Leave the loop start empty to use "
-            "the WAV's own loop, or loop the whole song.")).grid(row=len(rows), column=0, columnspan=3,
+            "BPM and the first beat drive the enemies' dance; 'auto' estimates them. The bah times "
+            "file places their hops (seconds [kind] per line, or Audacity labels); empty: every "
+            "fourth bar. Leave the loop start empty to use the WAV's own loop, or loop the whole "
+            "song.")).grid(row=len(rows), column=0, columnspan=3,
                                                                   sticky="w", padx=4, pady=6)
         return rows[2][1]
 
@@ -59,6 +64,11 @@ class AddDialog(simpledialog.Dialog):
         p = filedialog.askopenfilename(parent=self, filetypes=[("WAV", "*.wav"), ("All files", "*.*")])
         if p:
             self.path.set(p)
+
+    def browse_bahs(self):
+        p = filedialog.askopenfilename(parent=self, filetypes=[("Text", "*.txt"), ("All files", "*.*")])
+        if p:
+            self.bahs.set(p)
 
     def validate(self):
         try:
@@ -83,11 +93,22 @@ class AddDialog(simpledialog.Dialog):
         if loop and not loop.isdigit():
             messagebox.showerror(TITLE, "The loop start is a sample number.", parent=self)
             return False
+        bahs = None
+        if self.bahs.get().strip():
+            try:
+                with open(self.bahs.get().strip(), encoding="utf-8-sig") as fh:
+                    bahs = edit.parse_bahs(fh.read())
+                assert all(1 <= k <= 4 for _, k in bahs)
+            except Exception:
+                messagebox.showerror(TITLE, "The bah times file needs one 'seconds [kind 1-4]' per line.",
+                                     parent=self)
+                return False
         self.result = {
             "label": edit.custom_label(slot, self.fast.get()),
             "path": self.path.get(),
             "bpm": int(bpm) if bpm.isdigit() else None,
             "offset": offset,
+            "bahs": bahs,
             "loop_start": int(loop) if loop else None,
             "loop": not self.noloop.get(),
         }
@@ -353,8 +374,9 @@ class App(tk.Tk):
                 new = wav_to_fwav(src, log=lambda *_: None)[0]
             if s.label in self.custom:
                 old = edit.custom_music(music.bf)
-                return edit.set_custom_music(music.bf, [(l, new if l == s.label else w, b, v, o)
-                                                        for l, w, b, v, o in old])
+                # a new song gets a fresh beat track; the others keep theirs
+                return edit.set_custom_music(music.bf, [(l, new, b, v, o, None) if l == s.label else
+                                                        (l, w, b, v, o, q) for l, w, b, v, o, q in old])
             info = F.fwav_info(new)
             plan = [(layer, new)]
             if mute:
@@ -383,7 +405,7 @@ class App(tk.Tk):
             bpm, offset = estimate_beat(pcm, rate, r["bpm"])
             if r["offset"] is not None:
                 offset = r["offset"]
-            return edit.add_music(bf, r["label"], blob, bpm, offset=offset)
+            return edit.add_music(bf, r["label"], blob, bpm, offset=offset, bahs=r["bahs"])
         self.apply(f"Adding {r['label']}", make)
 
     def remove(self):

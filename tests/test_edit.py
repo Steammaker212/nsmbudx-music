@@ -59,13 +59,28 @@ def test_beat_seq():
     assert len(jumps) == 3
 
 
+def test_manual_bahs():
+    from nsmbudx_music import formats as F
+    assert edit.parse_bahs("# times\n1.5\n3.0 4\n4.25\t4.25\t1\n") == [(1.5, 3), (3.0, 4), (4.25, 1)]
+    blob, start = edit.build_beat_seq("X", 120, 10.0, bahs=[(1.5, 3), (3.0, 4)])
+    data = F.fseq_data(blob)[:start]
+    t, bahs = 0, []
+    for _, c in F.seq_disasm(data, 0, 400):
+        if c.startswith("wait"):
+            t += int(c.split()[1])
+        elif c.startswith("ext 0x80 00"):
+            bahs.append((t, int(c[11:13], 16)))
+    assert bahs == [(288, 3), (576, 4)]      # 1.5 s and 3 s at 192 ticks a second
+
+
 @needs_archive
 def test_add_and_remove_music():
     bf = Bfsar(BFSAR)
     wave = fwav.Wave.from_pcm(np.zeros((14 * 200, 2), np.int16), 48000, 0, workers=1).build()
     added = Bfsar(edit.add_music(bf, "CUSTOM_BGM_07", wave, bpm=128, offset=0.0390625))
     tpl = next(s for s in bf.sounds if s.label == edit.TEMPLATE)
-    assert edit.custom_music(added) == [("CUSTOM_BGM_07", wave, 128, tpl.volume, 0.0390625)]
+    (got,) = edit.custom_music(added)
+    assert got[:5] == ("CUSTOM_BGM_07", wave, 128, tpl.volume, 0.0390625)
     s = added.sounds[-1]
     assert s.label == "CUSTOM_BGM_07" and s.kind == "SEQ"
     assert s.detail["banks"] == [added.banks[-1]["id"]] and s.detail["track_flags"] == 3

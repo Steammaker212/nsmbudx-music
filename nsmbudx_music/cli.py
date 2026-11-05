@@ -13,7 +13,7 @@ reverse-engineering/FindingsI/AUDIO.md):
     python -m nsmbudx_music <Sound.bfsar> extract <out_dir> [regex] [--wav]
     python -m nsmbudx_music <Sound.bfsar> inject <label> <layer|all> <in.wav|in.bfwav>
                             -o <out.bfsar> [--loop-start SAMPLES | --no-loop] [--silence-others]
-    python -m nsmbudx_music <Sound.bfsar> add <slot> <in.wav> -o <out.bfsar> [--fast] [--bpm N] [--offset S]
+    python -m nsmbudx_music <Sound.bfsar> add <slot> <in.wav> -o <out.bfsar> [--fast] [--bpm N] [--offset S] [--bahs FILE]
     python -m nsmbudx_music <Sound.bfsar> remove <slot> -o <out.bfsar>
     python -m nsmbudx_music <Sound.bfsar> dump <out_dir>      # every table as CSV
 """
@@ -177,7 +177,7 @@ def cmd_inject(m, label, layer, src, out, loop_start, no_loop, silence_others):
     print(f"wrote {out} ({len(data):,} bytes)")
 
 
-def cmd_add(m, name, src, out, fast, bpm, offset, loop_start, no_loop, volume):
+def cmd_add(m, name, src, out, fast, bpm, offset, bahs, loop_start, no_loop, volume):
     label = edit.custom_label(name, fast)
     if src.lower().endswith(".bfwav"):
         blob = load_input(src, None, False)
@@ -187,7 +187,11 @@ def cmd_add(m, name, src, out, fast, bpm, offset, loop_start, no_loop, volume):
         found_bpm, found_offset = estimate_beat(pcm, rate, bpm)
         rate_bpm = bpm or found_bpm
         offset = found_offset if offset is None else offset
-    data = edit.add_music(m.bf, label, blob, rate_bpm, volume, offset)
+    if bahs:
+        with open(bahs, encoding="utf-8-sig") as f:
+            bahs = edit.parse_bahs(f.read())
+        print(f"{len(bahs)} bahs from the file")
+    data = edit.add_music(m.bf, label, blob, rate_bpm, volume, offset, bahs or None)
     with open(out, "wb") as f:
         f.write(data)
     print(f"{label}: {os.path.basename(src)}, {rate_bpm} BPM, first beat {offset:.3f} s -> {out} "
@@ -220,6 +224,8 @@ def main():
     p.add_argument("--fast", action="store_true", help="the hurry-up version (CUSTOM_BGM_<slot>_FAST)")
     p.add_argument("--bpm", type=int, help="tempo for the enemies' beat (default: estimated)")
     p.add_argument("--offset", type=float, help="seconds to the song's first beat (default: estimated)")
+    p.add_argument("--bahs", help="text file of times (seconds [kind]) for the enemies' hops, "
+                                  "or an Audacity label export (default: every fourth bar)")
     p.add_argument("--volume", type=int, help="0-255 (default 80, like the overworld music)")
     p.add_argument("--loop-start", type=int); p.add_argument("--no-loop", action="store_true")
     p = sub.add_parser("remove", help="remove added music"); p.add_argument("slot")
@@ -234,7 +240,7 @@ def main():
     elif a.cmd == "extract":
         cmd_extract(m, a.out, a.regex, a.wav)
     elif a.cmd == "add":
-        cmd_add(m, a.slot, a.input, a.out, a.fast, a.bpm, a.offset, a.loop_start, a.no_loop, a.volume)
+        cmd_add(m, a.slot, a.input, a.out, a.fast, a.bpm, a.offset, a.bahs, a.loop_start, a.no_loop, a.volume)
     elif a.cmd == "remove":
         cmd_remove(m, a.slot, a.out)
     else:
