@@ -10,6 +10,9 @@ Added music plays in levels through the Custom Music sprite (785) of
 
 No game files are included. You need your own dump of the game's romfs.
 
+**New to this?** Read the [custom music guide](docs/custom-music-guide.md): preparing
+the audio, loops, getting the enemies to dance on the beat, and using it in a level.
+
 ## How the game stores music
 
 Everything is in one file, `romfs/Sound/Sound.bfsar` (354 MB). It has no stream
@@ -29,7 +32,14 @@ The full reverse-engineering notes (file layout, sequence bytecode, the game's B
 tables and addresses) are in
 [nsmbud-reverse/reverse-engineering/FindingsI/AUDIO.md](https://github.com/Steammaker212/nsmbud-reverse/blob/main/reverse-engineering/FindingsI/AUDIO.md).
 
-## Setup
+## Download
+
+The [releases page](https://github.com/Steammaker212/nsmbudx-music/releases) has
+`nsmbudx-music.exe` (the editor window) and `nsmbudx-music-cli.exe` (the commands
+below) for Windows. Nothing to install: the commands below work the same with
+`nsmbudx-music-cli.exe` in place of `python -m nsmbudx_music`.
+
+## Setup (from source)
 
 Python 3.10 or newer, and numpy.
 
@@ -118,14 +128,17 @@ python -m nsmbudx_music Sound.new2.bfsar remove 0 -o Sound.new3.bfsar
 slot 0. `--fast` adds the version for when time runs low. Adding a slot again replaces
 it. Options:
 
-- `--bpm N` sets the tempo the enemies hop to. By default it is estimated from the song;
-  set it when the estimate is off (it may find half or double the real tempo).
+- `--bpm N` and `--offset SECONDS` set the tempo and the first beat the enemies dance to.
+  By default both are estimated from the song; set them when the hops are off (see the
+  [guide](docs/custom-music-guide.md#4-getting-the-enemies-to-dance-on-the-beat)).
 - `--loop-start`, `--no-loop` and the input formats work as in `inject`.
-- `--volume` is 0-255; the default (90) matches the title music.
+- `--volume` is 0-255; the default (80) matches the overworld music.
 
-The game loads the whole archive into its sound memory. The nsmbud-reverse code makes
-that memory bigger by what you add, taken from the game's other memory, so keep added
-music to a few minutes in total. A 98-second stereo song adds about 5 MB.
+An added song is a sequence sound like the game's course music: a silent beat track
+for the enemies, and the song played through its own bank. It is listed in GROUP_BOOT,
+so the game loads it at boot and keeps it in its sound memory. The nsmbud-reverse code
+makes that memory bigger by what you add, taken from the game's other memory, so keep
+added music to a few minutes in total. A 98-second stereo song adds about 5 MB.
 
 ### Use it in a level
 
@@ -176,10 +189,11 @@ Writes `sounds.csv`, `files.csv`, `banks.csv`, `wavearcs.csv`, `groups.csv`,
 
 ## Limitations
 
-- Replacing music works in game. Added music is tested to boot (Ryujinx) with a
-  98-second song; playing it in a level has not been checked yet.
+- Replacing and adding music are tested in game (Ryujinx) with a 98-second song.
 - A replaced course song keeps the original's beat map, so enemies hop to the old beat.
-  Added songs use their BPM.
+  Added songs use their BPM and first beat.
+- An added song's "bah" hop falls on beat 3 of every fourth bar, not where the song
+  itself would shout; the game's own songs have theirs placed by hand.
 - Course music is loaded into memory rather than streamed. Very long songs may not fit
   the game's sound heap; the original layers are 40-90 s each.
 - Wii U (big-endian) BFWAVs are refused. Convert them first, or give a WAV.
