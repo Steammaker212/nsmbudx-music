@@ -1,4 +1,4 @@
-import os
+﻿import os
 import struct
 import tempfile
 
@@ -47,24 +47,36 @@ def test_read_wav_formats(tmp_path, tag, bits, dtype):
     assert np.allclose(pcm, np.clip(x * 32767, -32768, 32767), atol=2)
 
 
+def test_beat_seq():
+    from nsmbudx_music import formats as F
+    blob, start = edit.build_beat_seq("CUSTOM_BGM_01", 120, 10.0, loop=2.0)
+    assert F.fseq_labels(blob) == {"CUSTOM_BGM_01": start}
+    data = F.fseq_data(blob)
+    code = dict(F.seq_disasm(data[:start + 9], 0, 400))
+    assert code[start].startswith("opentrack 1") and code[start + 5] == "jump -> 0"
+    # 10 s at 120 BPM is 1920 ticks: two-bar pattern at 0, 384, 576, 768, ...; loop at 384
+    jumps = [c for c in code.values() if c.startswith("jump")]
+    assert len(jumps) == 3
+
+
 @needs_archive
 def test_add_and_remove_music():
     bf = Bfsar(BFSAR)
     wave = fwav.Wave.from_pcm(np.zeros((14 * 200, 2), np.int16), 48000, 0, workers=1).build()
-    added = Bfsar(edit.add_music(bf, "CUSTOM_BGM_07", wave, bpm=128))
-    assert edit.custom_music(added) == [("CUSTOM_BGM_07", wave, 128, bf.sounds[560].volume)]
-    m = Music(added.data)
+    added = Bfsar(edit.add_music(bf, "CUSTOM_BGM_07", wave, bpm=128, offset=0.0390625))
+    tpl = next(s for s in bf.sounds if s.label == edit.TEMPLATE)
+    assert edit.custom_music(added) == [("CUSTOM_BGM_07", wave, 128, tpl.volume, 0.0390625)]
     s = added.sounds[-1]
-    assert s.label == "CUSTOM_BGM_07" and s.kind == "WSD"
-    (_, wavearc, index, _), = m.layers(s)
-    assert m.war(wavearc)[1][index] == wave
+    assert s.label == "CUSTOM_BGM_07" and s.kind == "SEQ"
+    assert s.detail["banks"] == [added.banks[-1]["id"]] and s.detail["track_flags"] == 3
     # the game's own files are untouched, except GROUP_BOOT, which now lists the new ones
     boot = next(g["file"] for g in bf.groups if g["label"] == "GROUP_BOOT")
     assert all(added.file_bytes(i) == bf.file_bytes(i) for i in range(len(bf.files)) if i != boot)
     files, sets = edit.parse_fgrp(added.file_bytes(boot))
     old_files, old_sets = edit.parse_fgrp(bf.file_bytes(boot))
-    assert files == old_files + [len(bf.files), len(bf.files) + 1]
-    assert sets == old_sets + [(added.soundsets[-1]["id"], 0xFFFFFFFF)]
+    n = len(bf.files)
+    assert files == old_files + [n, n + 1, n + 2]
+    assert sets == old_sets + [(s.id, 0xFFFFFFFF), (added.banks[-1]["id"], 0xFFFFFFFF)]
     assert added.files[-1]["groups"] == [next(g["id"] for g in bf.groups if g["label"] == "GROUP_BOOT")]
     # adding the same label again replaces it; removing gives the game's archive back
     again = Bfsar(edit.add_music(added, "CUSTOM_BGM_07", wave, bpm=90))

@@ -6,12 +6,13 @@ together with the data it points to forms one contiguous chunk, so chunks can be
 moved as a whole (their internal offsets are relative to themselves). STRG gets
 a fresh string table and patricia tree; FILE is laid out as in fwav.rebuild_bfsar.
 
-New music is added as a wave sound (WSD), the kind the game already uses for
-airship and boss music: one FWSD file with one wave sound, one wave archive with
-one wave, and a wave sound set covering the new sound. The new files and the set
-are listed in GROUP_BOOT: the game plays a wave sound only when its wave archive
-belongs to a group it has loaded (otherwise StartSound fails with "wave archive
-not loaded"), and GROUP_BOOT is loaded at boot and never unloaded.
+New music is added the way the game builds its course music: a sequence sound
+whose track 0 is a silent beat map (the enemies dance to the sequence variables it
+writes) and whose track 1 plays the song through a bank with one wave archive.
+The new files, the sound and the bank are listed in GROUP_BOOT with every load
+flag: the game finds a file only once a group it has loaded lists it (otherwise
+StartSound fails with error 8), and GROUP_BOOT is loaded at boot and never
+unloaded.
 """
 import struct
 
@@ -23,8 +24,9 @@ SOUND, SOUNDSET, BANK, WAVEARC, GROUP, PLAYER, FILE = range(7)
 ITEM_TYPE = {SOUND: 1, SOUNDSET: 2, BANK: 3, PLAYER: 4, WAVEARC: 5, GROUP: 6}
 NO_STRING = 0xFFFFFFFF
 HOME_GROUP = "GROUP_BOOT"
-# template for new music: a looping two-channel BGM wave sound
-TEMPLATE = "STRM_BGM_TITLE"
+# template for new music: a course music sequence and its bank
+TEMPLATE = "STRM_BGM_CHIJOU"
+LOAD_ALL = 0xFFFFFFFF      # group item load flags: sequence, bank and wave archive
 
 
 def align(n, a):
@@ -132,45 +134,64 @@ class Editor:
         return (ITEM_TYPE[section] << 24) | len(self.sections[section])
 
     # --- new music -------------------------------------------------------
-    def add_wave_music(self, label, fwav, bpm=0, volume=None, template=TEMPLATE):
-        """Add `label` as a wave sound playing `fwav` (FWAV bytes). Returns the sound id."""
+    def add_seq_music(self, label, fwav, bpm, volume=None, offset=0.0, template=TEMPLATE):
+        """Add `label` as a sequence sound playing `fwav`, like the game's own course music.
+
+        Track 0 of the new sequence is a silent beat map at `bpm` (the enemies' "bah"), track 1
+        plays the song through a one-wave bank. `offset` is the first beat in seconds.
+        Returns the sound id.
+        """
         from .fwav import build_fwar
         bf = self.bf
         tpl = next(s for s in bf.sounds if s.label == template)
-        tpl_set = next(i for i, ss in enumerate(bf.soundsets) if ss["start"] <= tpl.id <= ss["end"])
+        tpl_bank = tpl.detail["banks"][0] & 0xFFFFFF
 
         sound_id = self.next_id(SOUND)
-        set_id = self.next_id(SOUNDSET)
+        bank_id = self.next_id(BANK)
         war_id = self.next_id(WAVEARC)
 
+        info = F.fwav_info(fwav)
+        loop = info["loop_start"] if info["loop"] else None
+        seq, start = build_beat_seq(label, bpm, info["samples"] / info["rate"],
+                                    None if loop is None else loop / info["rate"], offset)
         war_file = self.add_file(build_fwar([fwav]))
-        wsd_file = self.add_file(self._single_fwsd(tpl, war_id))
+        bank_file = self.add_file(self._one_wave_bank(bf.banks[tpl_bank]["file"], war_id))
+        seq_file = self.add_file(seq)
 
         # wave archive info: file id, not loaded individually, no options (as the game's own)
         self.sections[WAVEARC].append(struct.pack("<IBxxxI", war_file, 0, 0))
 
+        # bank info cloned from the template's bank
+        chunk = bytearray(self.sections[BANK][tpl_bank])
+        struct.pack_into("<I", chunk, 0, bank_file)
+        self._set_option(chunk, 12, 0, len(self.strings))
+        self.sections[BANK].append(bytes(chunk))
+        self.add_string("BANK_" + label, bank_id)
+
         # sound info cloned from the template, then re-pointed
         chunk = bytearray(self.sections[SOUND][tpl.id & 0xFFFFFF])
-        struct.pack_into("<I", chunk, 0, wsd_file)
+        struct.pack_into("<I", chunk, 0, seq_file)
         if volume is not None:
             chunk[8] = volume
         dt, doff = struct.unpack_from("<Hxxi", chunk, 12)
-        assert dt == 0x2202
-        struct.pack_into("<I", chunk, doff, 0)           # wave sound index 0 in the new FWSD
+        assert dt == 0x2203
+        _, boff = struct.unpack_from("<Hxxi", chunk, doff)
+        assert struct.unpack_from("<I", chunk, doff + boff)[0] == 1
+        struct.pack_into("<I", chunk, doff + boff + 4, bank_id)
+        struct.pack_into("<I", chunk, doff + 8, 0b11)          # tracks 0 and 1
+        self._set_option(chunk, doff + 12, 0, start)           # sequence start offset
         self._set_option(chunk, 20, 0, len(self.strings))
-        self._set_option(chunk, 20, 31, bpm)               # user param 0: BPM for beat sync
+        self._set_option(chunk, 20, 31, bpm)                   # user param 0: BPM
         self.sections[SOUND].append(bytes(chunk))
         self.add_string(label, sound_id)
 
-        # sound set cloned from the template's set: one sound, one file, one wave archive
-        self.sections[SOUNDSET].append(self._single_soundset(tpl_set, sound_id, wsd_file, war_id))
-        self.add_string("WSDSET_" + label, set_id)
         group_id = next(g["id"] for g in bf.groups if g["label"] == HOME_GROUP)
         while len(self.sections[FILE]) < len(self.files):
             self.sections[FILE].append(new_file_info([group_id]))
         gid = self._group_file(HOME_GROUP)
         items, sets = parse_fgrp(self.files[gid])
-        self.files[gid] = build_fgrp(items + [war_file, wsd_file], sets + [(set_id, 0xFFFFFFFF)])
+        self.files[gid] = build_fgrp(items + [war_file, bank_file, seq_file],
+                                     sets + [(sound_id, LOAD_ALL), (bank_id, LOAD_ALL)])
         return sound_id
 
     def _group_file(self, label):
@@ -182,44 +203,16 @@ class Editor:
         slot = bin(flags & ((1 << bit) - 1)).count("1")
         struct.pack_into("<I", chunk, at + 4 + 4 * slot, value)
 
-    def _single_fwsd(self, tpl, war_id):
-        """The template's FWSD cut down to the template's own wave sound, pointing at war_id."""
-        blob = bytearray(self.bf.file_bytes(tpl.file_id))
+    def _one_wave_bank(self, file_id, war_id):
+        """The template bank with every wave id table entry pointing at wave 0 of war_id."""
+        blob = bytearray(self.bf.file_bytes(file_id))
         r, b = R(blob), F.blocks(blob)
-        i = b[0x6800][0] + 8
-        # wave id table: point every entry at our archive, wave 0
+        i = b[0x5800][0] + 8
         _, toff = r.ref(i)
         tab = i + toff
         for k in range(r.u32(tab)):
             struct.pack_into("<II", blob, tab + 4 + 8 * k, war_id, 0)
-        # wave sound data table: keep only the template's entry by moving it to slot 0
-        _, doff = r.ref(i + 8)
-        dtab = i + doff
-        n = r.u32(dtab)
-        index = tpl.detail["index"]
-        ref = blob[dtab + 4 + 8 * index: dtab + 12 + 8 * index]
-        t, off = struct.unpack_from("<Hxxi", ref)
-        struct.pack_into("<I", blob, dtab, 1)
-        struct.pack_into("<Hxxi", blob, dtab + 4, t, off + 8 * index)
-        # its note infos all name wave id table entry 0 or more; all now point at our wave
         return bytes(blob)
-
-    def _single_soundset(self, tpl_set, sound_id, wsd_file, war_id):
-        chunk = bytearray(self.sections[SOUNDSET][tpl_set])
-        struct.pack_into("<II", chunk, 0, sound_id, sound_id)
-        r = R(chunk)
-        _, foff = r.ref(8)
-        n = r.u32(foff)
-        assert n >= 1
-        struct.pack_into("<II", chunk, foff, 1, wsd_file)
-        dt, doff = r.ref(16)
-        if dt == 0x2205 and doff != -1:
-            _, woff = r.ref(doff)
-            wtab = doff + woff
-            if r.u32(wtab) >= 1:
-                struct.pack_into("<II", chunk, wtab, 1, war_id)
-        self._set_option(chunk, 24, 0, len(self.strings))    # its label is added next
-        return bytes(chunk)
 
     # --- write -------------------------------------------------------------
     def build_strg(self):
@@ -310,6 +303,87 @@ def new_file_info(groups=()):
             struct.pack("<I", len(groups)) + b"".join(struct.pack("<I", g) for g in groups))
 
 
+# --- FSEQ --------------------------------------------------------------------
+TIMEBASE = 96          # ticks per quarter note, as the game's sequences
+# The course music's beat track, after STRM_BGM_CHIJOU's. Sequence variable 1 (read by
+# SndAudioMgr::getChorusAccentSign) is set to 3 on each bar pair's downbeat and 2 on beats
+# 5 and 7. Variable 0 (getBgmAccentSign) is the "bah": the enemies hop when it is set; the
+# game's songs set it a few times per loop, 1-4 picking the kind of hop. Here: one 3, the
+# overworld's single "bah", on beat 3 of every fourth bar. (tick in four bars, variable, value)
+BEAT_PERIOD = 16 * TIMEBASE
+BEAT_PATTERN = [(0, 1, 3), (384, 1, 2), (576, 1, 2),
+                (768, 1, 3), (1152, 1, 2), (1344, 1, 2), (1344, 0, 3)]
+
+
+def _varlen(n):
+    out = [n & 0x7F]
+    n >>= 7
+    while n:
+        out.append(0x80 | (n & 0x7F))
+        n >>= 7
+    return bytes(reversed(out))
+
+
+def _u24(n):
+    return n.to_bytes(3, "little")
+
+
+def build_beat_seq(label, bpm, length, loop=None, offset=0.0):
+    """FSEQ for added music: (file bytes, start offset of `label` in DATA).
+
+    Track 0 is silent and only writes BEAT_PATTERN at `bpm` over the song's `length`
+    seconds, from the first beat at `offset` seconds, jumping back to `loop` seconds at
+    the end, so it stays on the song's beat.
+    Track 1 plays program 0 note 60 forever (the song itself, through the bank), and
+    the start code opens track 1 and runs track 0, like the game's own course music.
+    """
+    if not 1 <= bpm <= 0xFFFF:
+        raise ValueError("music needs a tempo (BPM) for the beat track")
+    tick = lambda s: round(s * bpm * TIMEBASE / 60)
+    end, loop_at, first = max(tick(length), 1), tick(loop or 0), tick(offset)
+    sets = {}
+    for k in range(first, end, BEAT_PERIOD):
+        for t, var, val in BEAT_PATTERN:
+            if t + k < end:
+                sets.setdefault(t + k, []).append((var, val))
+    events = sorted(set(sets) | {loop_at, end})
+
+    data = bytearray(b"\xb0\x60\xc7\x00\xe1" + struct.pack("<H", bpm) + b"\xc1\x00")
+    loop_off, now = None, 0
+    for t in events:
+        if t > now:
+            data += b"\x80" + _varlen(t - now)
+            now = t
+        if t == loop_at and loop_off is None:
+            loop_off = len(data)
+        if t == end:
+            break
+        for var, val in sets.get(t, []):
+            data += b"\xf0\x80" + bytes([var]) + struct.pack("<h", val)
+    data += b"\x89" + _u24(loop_off)
+
+    track1 = len(data)
+    data += b"\xe1" + struct.pack("<H", bpm) + b"\xb0\x60\x81\x00\x3c\x7f\x00\x89" + _u24(track1)
+    start = len(data)
+    data += b"\x88\x01" + _u24(track1) + b"\x89" + _u24(0)
+
+    data_block = b"DATA" + struct.pack("<I", align(8 + len(data), 0x20)) + bytes(data)
+    data_block += b"\0" * (align(len(data_block), 0x20) - len(data_block))
+    name = label.encode("ascii")
+    entry = struct.pack("<HxxiI", 0x1F00, start, len(name)) + name + b"\0"
+    entry += b"\0" * (align(len(entry), 4) - len(entry))
+    labl = struct.pack("<IHxxi", 1, 0x5100, 12) + entry
+    labl_block = b"LABL" + struct.pack("<I", align(8 + len(labl), 0x20)) + labl
+    labl_block += b"\0" * (align(len(labl_block), 0x20) - len(labl_block))
+    labl_off = 0x40 + len(data_block)
+    total = labl_off + len(labl_block)
+    hdr = struct.pack("<4sHHIIHH", b"FSEQ", 0xFEFF, 0x40, 0x00020000, total, 2, 0)
+    hdr += struct.pack("<HHiI", 0x5000, 0, 0x40, len(data_block))
+    hdr += struct.pack("<HHiI", 0x5001, 0, labl_off, len(labl_block))
+    hdr += b"\0" * (0x40 - len(hdr))
+    return hdr + data_block + labl_block, start
+
+
 # --- FGRP --------------------------------------------------------------------
 def parse_fgrp(blob):
     """([file ids], [(item id, load flags)]) of a group with no embedded files.
@@ -330,10 +404,11 @@ def parse_fgrp(blob):
 
 
 def _strip_group(items, sets):
-    """Drop what add_wave_music put in a group."""
+    """Drop what add_seq_music (or the older wave sound adder) put in a group."""
     return ([f for f in items if f < VANILLA[FILE]],
             [(i, f) for i, f in sets
-             if not (i >> 24 == ITEM_TYPE[SOUNDSET] and (i & 0xFFFFFF) >= VANILLA[SOUNDSET])])
+             if not any(i >> 24 == ITEM_TYPE[k] and (i & 0xFFFFFF) >= VANILLA[k]
+                        for k in (SOUND, SOUNDSET, BANK))])
 
 
 def build_fgrp(items, sets):
@@ -363,8 +438,8 @@ def build_fgrp(items, sets):
     return hdr + info_block + file_block + infx_block
 
 
-# v1.0.0's own item counts. Everything after them was added by add_wave_music.
-VANILLA = {SOUND: 3502, SOUNDSET: 120, WAVEARC: 134, FILE: 380}
+# v1.0.0's own item counts. Everything after them was added by this module.
+VANILLA = {SOUND: 3502, SOUNDSET: 120, BANK: 87, WAVEARC: 134, FILE: 380}
 VANILLA_STRINGS = 3768
 
 
@@ -374,34 +449,53 @@ def custom_label(name, fast=False):
     return label + "_FAST" if fast and not label.endswith("_FAST") else label
 
 
+def beat_offset(seq, bpm):
+    """Seconds to the first beat of a beat track built by build_beat_seq."""
+    data = F.fseq_data(seq)
+    if data[9] != 0x80:                    # first event right after the 9-byte track header
+        return 0.0
+    ticks, p = 0, 10
+    while True:
+        ticks = ticks << 7 | data[p] & 0x7F
+        if not data[p] & 0x80:
+            return ticks * 60 / (bpm * TIMEBASE)
+        p += 1
+
+
 def custom_music(bf):
-    """[(label, fwav bytes, bpm, volume)] of the music added to `bf`, in order."""
+    """[(label, fwav bytes, bpm, volume, first beat seconds)] of the music added to `bf`."""
     out = []
     for s in bf.sounds[VANILLA[SOUND]:]:
-        if s.kind != "WSD":
+        if s.kind == "SEQ":
+            bank = bf.banks[s.detail["banks"][0] & 0xFFFFFF]
+            war_id, index = F.fbnk_waves(bf.file_bytes(bank["file"]))[0]
+            offset = beat_offset(bf.file_bytes(s.file_id), s.options.get(31, 120))
+        elif s.kind == "WSD":      # added by older versions
+            war_id, index = F.fwsd_sound_waves(bf.file_bytes(s.file_id), s.detail["index"])[0]
+            offset = 0.0
+        else:
             continue
-        (war_id, index), = F.fwsd_sound_waves(bf.file_bytes(s.file_id), s.detail["index"])[:1]
         war = bf.file_bytes(bf.wavearcs[war_id & 0xFFFFFF]["file"])
         off, size = F.fwar_entries(war)[index]
-        out.append((s.label, war[off:off + size], s.options.get(31, 0), s.volume))
+        out.append((s.label, war[off:off + size], s.options.get(31, 0) or 120, s.volume, offset))
     return out
 
 
 def set_custom_music(bf, music):
-    """Archive bytes with exactly `music` [(label, fwav, bpm, volume)] as the added music."""
+    """Archive bytes with exactly `music` [(label, fwav, bpm, volume, offset)] as the added music."""
     ed = Editor(bf)
     ed.truncate_to_vanilla()
-    for label, fwav, bpm, volume in music:
-        ed.add_wave_music(label, fwav, bpm, volume)
+    for label, fwav, bpm, volume, offset in music:
+        ed.add_seq_music(label, fwav, bpm, volume, offset)
     return ed.build()
 
 
-def add_music(bf, label, fwav, bpm=0, volume=None):
+def add_music(bf, label, fwav, bpm, volume=None, offset=0.0):
     """Archive bytes with `label` added, or replaced if it was added before."""
     music = [m for m in custom_music(bf) if m[0] != label]
     if label in bf.strings and label not in [m[0] for m in custom_music(bf)]:
         raise ValueError(f"{label} is one of the game's own sounds; use inject to replace it")
-    return set_custom_music(bf, music + [(label, fwav, bpm, volume)])
+    return set_custom_music(bf, music + [(label, fwav, bpm, volume, offset)])
 
 
 def remove_music(bf, label):

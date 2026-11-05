@@ -197,6 +197,8 @@ def seq_disasm(data, start, limit=200):
     while p < len(data) and len(out) < limit:
         at, c = p, data[p]; p += 1
         if c < 0x80:
+            if p + 1 >= len(data):   # zero padding after the last command
+                break
             vel = data[p]; p += 1
             ln, p = _varlen(data, p)
             out.append((at, f"note {c} vel {vel} len {ln}"))
