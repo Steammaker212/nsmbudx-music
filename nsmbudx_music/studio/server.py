@@ -273,10 +273,41 @@ def start_job(title, fn):
 
 
 # --- API ---------------------------------------------------------------------
+RECENT = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "nsmbudx-music", "recent.json")
+
+
+def recent_files():
+    try:
+        with open(RECENT, encoding="utf-8") as f:
+            return [p for p in json.load(f) if isinstance(p, str)][:8]
+    except (OSError, ValueError):
+        return []
+
+
+def remember(path):
+    paths = [path] + [p for p in recent_files() if os.path.normcase(p) != os.path.normcase(path)]
+    try:
+        os.makedirs(os.path.dirname(RECENT), exist_ok=True)
+        with open(RECENT, "w", encoding="utf-8") as f:
+            json.dump(paths[:8], f)
+    except OSError:
+        pass
+
+
+def api_recent(q, body):
+    return [{"path": p, "exists": os.path.isfile(p)} for p in recent_files()]
+
+
 def api_open(q, body):
-    path = body.get("path") or dialogs.open_file("bfsar", "Open Sound.bfsar")
+    path = (body.get("path") or "").strip().strip('"') or dialogs.open_file("bfsar", "Open Sound.bfsar")
     if not path:
         return {"cancelled": True}
+    path = os.path.abspath(os.path.expandvars(path))
+    if os.path.isdir(path):
+        for sub in ("Sound.bfsar", os.path.join("Sound", "Sound.bfsar"), os.path.join("romfs", "Sound", "Sound.bfsar")):
+            if os.path.isfile(os.path.join(path, sub)):
+                path = os.path.join(path, sub)
+                break
     if not os.path.isfile(path):
         raise ApiError(f"{path} does not exist")
 
@@ -288,6 +319,7 @@ def api_open(q, body):
             raise ApiError("not a sound archive (FSAR)")
         PROJECT.load(data, path)
         PROJECT.dirty = False
+        remember(path)
         return PROJECT.summary()
     return start_job("Opening archive", work)
 
@@ -641,6 +673,7 @@ def api_job(q, body):
 
 ROUTES = {
     ("GET", "/api/summary"): lambda q, b: PROJECT.summary(),
+    ("GET", "/api/recent"): api_recent,
     ("GET", "/api/tree"): lambda q, b: (PROJECT.require(), PROJECT.sync(), PROJECT.tree())[2],
     ("GET", "/api/item"): api_item,
     ("GET", "/api/archive"): api_archive,
