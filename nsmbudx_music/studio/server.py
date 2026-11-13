@@ -17,9 +17,9 @@ from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
-from .. import __version__, banks, edit, fwav, info, render, seq
+from .. import __version__, banks, beat, edit, fwav, info, render, seq
 from .. import formats as F
-from ..audio import estimate_beat, pcm_to_fwav, read_wav, write_wav
+from ..audio import estimate_beat, match_length, pcm_to_fwav, read_wav, write_wav
 from ..bfsar import Bfsar
 from ..cli import COURSE_NAMES, course_id
 from . import dialogs
@@ -664,6 +664,154 @@ def api_music_remove(q, body):
     return start_job(f"Removing {body['label']}", work)
 
 
+# --- course music: beat track, loop and layers per state ---------------------------
+ROLES = {1: "Song", 2: "Riding Yoshi", 3: "Third layer (muted by the game)"}
+
+
+def _course(index):
+    PROJECT.sync()
+    s = PROJECT.bf.sounds[index]
+    if s.kind != "SEQ":
+        raise ApiError("only sequence sounds have a beat track")
+    return s
+
+
+def api_course(q, body):
+    PROJECT.require()
+    index = int(q["index"])
+
+    def work(job):
+        s = _course(index)
+        b = beat.read_beat(PROJECT.bf, s)
+        layers = []
+        for l in beat.layer_tracks(PROJECT.bf, s):
+            w = PROJECT.waves.get(l["warc"], l["wave"])
+            layers.append({**l, "role": ROLES.get(l["track"], f"Track {l['track']}"),
+                           "warcIndex": l["warc"] & 0xFFFFFF, "warcLabel": PROJECT.label_of(l["warc"]),
+                           "seconds": w and w["samples"] / w["rate"], "rate": w and w["rate"],
+                           "loop": bool(w and w["loop"]), "loopStart": w and w["loop_start"] / w["rate"]})
+        custom = index >= edit.VANILLA[edit.SOUND] and s.label.startswith("CUSTOM_BGM_")
+        base = s.label[:-5] if s.label.endswith("_FAST") else s.label
+        pair_label = base if s.label.endswith("_FAST") else base + "_FAST"
+        pair = next(({"label": x.label, "index": i} for i, x in enumerate(PROJECT.bf.sounds)
+                     if x.label == pair_label), None)
+        return {"index": index, "label": s.label, "custom": custom, "fast": s.label.endswith("_FAST"),
+                "tempo": b["tempo"], "timebase": b["timebase"], "spt": b["spt"],
+                "events": b["events"], "loop": list(b["loop"]), "layers": layers, "pair": pair,
+                "pairLabel": pair_label}
+    return start_job("Reading the beat track", work)
+
+
+def api_course_beat(q, body):
+    PROJECT.require()
+    index = int(body["index"])
+
+    def work(job):
+        with PROJECT.lock:
+            s = _course(index)
+            old = beat.read_beat(PROJECT.bf, s)
+            events = sorted((int(t), int(v), int(val)) for t, v, val in body["events"]
+                            if int(v) in (beat.BAH, beat.ACCENT) and int(t) >= 0)
+            for t, v, val in events:
+                if v == beat.BAH and not 1 <= val <= 7 or v == beat.ACCENT and not 0 <= val <= 3:
+                    raise ApiError(f"value {val} at tick {t} is out of range")
+            ls = body.get("loopStart")
+            ls = None if ls is None else int(ls)
+            end = int(body["loopEnd"])
+            if end <= 0 or (ls is not None and not 0 <= ls < end):
+                raise ApiError("the loop must start before it ends")
+            ed = PROJECT.ed
+            start = s.detail["seq_opts"].get(0, 0)
+            ed.files[s.file_id] = beat.write_beat(ed.files[s.file_id], start, old["tempo"], old["timebase"],
+                                                  [e for e in events if e[0] < end], ls, end)
+            moved = []
+            if body.get("moveWaves", True) and (ls, end) != tuple(old["loop"]):
+                spt = old["spt"]
+                done = set()
+                for l in beat.layer_tracks(PROJECT.bf, s):
+                    key = (l["warc"], l["wave"])
+                    if key in done:
+                        continue
+                    done.add(key)
+                    fid = PROJECT.bf.wavearcs[l["warc"] & 0xFFFFFF]["file"]
+                    waves = fwav.fwar_waves(ed.files[fid])
+                    rate = F.fwav_info(waves[l["wave"]])["rate"]
+                    waves[l["wave"]], used = beat.set_wave_loop(
+                        waves[l["wave"]], 0 if ls is None else ls * spt * rate, end * spt * rate, ls is not None)
+                    ed.files[fid] = fwav.build_fwar(waves)
+                    moved.append({"track": l["track"], "loopStart": used / rate})
+            if index >= edit.VANILLA[edit.SOUND]:
+                bahs = any(v == beat.BAH for _, v, _ in events)
+                param = s.options.get(31, 0)
+                param = (param & ~edit.SONG_BAHS) | (edit.SONG_BAHS if bahs else 0)
+                info.set_field(ed, "sound", index, "user0", param)
+            PROJECT.changed()
+        return {"ok": True, "events": len(events), "waves": moved}
+    return start_job("Writing the beat track", work)
+
+
+def api_course_layer(q, body):
+    """Replace (or for added music add or remove) the layer a state plays."""
+    PROJECT.require()
+    index, track = int(body["index"]), int(body["track"])
+    path = body.get("path")
+    remove = body.get("remove")
+    if not remove and not path:
+        path = dialogs.open_file("wav", f"WAV for {ROLES.get(track, 'the layer')}")
+        if not path:
+            return {"cancelled": True}
+
+    def work(job):
+        with PROJECT.lock:
+            s = _course(index)
+            custom = index >= edit.VANILLA[edit.SOUND] and s.label.startswith("CUSTOM_BGM_")
+            layers = {l["track"]: l for l in beat.layer_tracks(PROJECT.bf, s)}
+            ref = layers.get(1)
+            ref_info = None
+            if ref:
+                ref_wave = fwav.fwar_waves(PROJECT.bf.file_bytes(PROJECT.bf.wavearcs[ref["warc"] & 0xFFFFFF]["file"]))[ref["wave"]]
+                ref_info = F.fwav_info(ref_wave)
+            new = None
+            if not remove:
+                job.log.append("encoding DSP-ADPCM")
+                pcm, rate, wav_loop = read_wav(os.path.abspath(path))
+                if custom or track != 1:
+                    # a layer plays in step with the song: same rate, length and loop
+                    if ref_info and rate != ref_info["rate"]:
+                        raise ApiError(f"the WAV is {rate} Hz, the song {ref_info['rate']} Hz: use the same rate")
+                    if ref_info and track != 1:
+                        pcm = match_length(pcm, np.zeros((ref_info["samples"], pcm.shape[1]), np.int16))
+                if ref_info and track != 1:
+                    ls, loop = ref_info["loop_start"], ref_info["loop"]
+                elif track in layers and not custom:
+                    old = F.fwav_info(fwav.fwar_waves(PROJECT.bf.file_bytes(
+                        PROJECT.bf.wavearcs[layers[track]["warc"] & 0xFFFFFF]["file"]))[layers[track]["wave"]])
+                    ls = wav_loop if wav_loop is not None else int(old["loop_start"] / old["rate"] * rate)
+                    loop = old["loop"] and ls < len(pcm)
+                else:
+                    ls, loop = wav_loop or 0, True
+                new = pcm_to_fwav(pcm, rate, ls, loop, log=job.log.append)[0]
+            if custom:
+                if track not in (1, 2):
+                    raise ApiError("added music has a song (track 1) and a Yoshi layer (track 2)")
+                data = edit.set_custom_layer(PROJECT.bf, s.label, "song" if track == 1 else "yoshi", new)
+                PROJECT.load(data, PROJECT.path)
+                PROJECT.dirty = True
+            else:
+                if remove:
+                    raise ApiError("the game's songs keep their layers; replace one instead")
+                if track not in layers:
+                    raise ApiError("this song has no such layer")
+                l = layers[track]
+                fid = PROJECT.bf.wavearcs[l["warc"] & 0xFFFFFF]["file"]
+                waves = fwav.fwar_waves(PROJECT.ed.files[fid])
+                waves[l["wave"]] = new
+                PROJECT.ed.files[fid] = fwav.build_fwar(waves)
+                PROJECT.changed()
+        return {"ok": True}
+    return start_job("Removing the layer" if remove else "Setting the layer", work)
+
+
 def api_job(q, body):
     job = JOBS.get(q["id"])
     if job is None:
@@ -701,6 +849,9 @@ ROUTES = {
     ("POST", "/api/bahs"): api_bahs,
     ("POST", "/api/music/add"): api_music_add,
     ("POST", "/api/music/remove"): api_music_remove,
+    ("GET", "/api/course"): api_course,
+    ("POST", "/api/course/beat"): api_course_beat,
+    ("POST", "/api/course/layer"): api_course_layer,
 }
 
 

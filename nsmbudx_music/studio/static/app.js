@@ -261,7 +261,7 @@ $("#btn-saveas").onclick = guard(async () => {
   const r = await api("/api/save", { method: "POST", body: { ask: true } });
   if (!r.cancelled) { toast(`Saved ${r.path}`, "good"); refresh(); }
 });
-$("#btn-add").onclick = () => openAddMusic();
+$("#btn-add").onclick = () => openAddMusic({});
 window.addEventListener("beforeunload", e => { if (S.summary && S.summary.dirty) { e.preventDefault(); e.returnValue = ""; } });
 setInterval(() => { fetch(audioUrl("/api/summary")).catch(() => { }); }, 10000);
 
@@ -486,6 +486,7 @@ function drawPlayer(sec) {
 
   const notesCard = h("div", { class: "card" }, h("h3", {}, "Notes"), h("canvas", { height: 120, id: "roll" }));
   sec.append(notesCard);
+  if (it.kind === "SEQ" && it.course) courseCards(sec, meta);
 
   function drawTracks() {
     trk.innerHTML = "";
@@ -840,11 +841,12 @@ async function tabHex(sec, offset = 0) {
 }
 
 /* ---------------------------------------------------------------- add music */
-function openAddMusic() {
+function openAddMusic(preset = {}) {
   if (!S.summary || !S.summary.open) return;
   const used = new Set(S.tree.filter(x => x.s === "sound").map(x => x.l));
   let slot = 0; while (used.has(`CUSTOM_BGM_${String(slot).padStart(2, "0")}`) && slot < 99) slot++;
-  const st = { song: null, buf: null, yoshi: null, slot, fast: false, volume: 80, loop: true, loopStart: null, bpm: null, offset: null,
+  if (preset.slot != null) slot = preset.slot;
+  const st = { song: null, buf: null, yoshi: null, slot, fast: !!preset.fast, volume: 80, loop: true, loopStart: null, bpm: null, offset: null,
     bahMode: "auto", bahs: [], tool: "seek", src: null, startAt: 0, pos: 0, playing: false, clicks: true, taps: [] };
   const box = $("#modal-box"); box.innerHTML = ""; $("#modal").classList.remove("hidden");
   const close = () => { stopPrev(); $("#modal").classList.add("hidden"); document.removeEventListener("keydown", onKey); };
@@ -887,7 +889,7 @@ function openAddMusic() {
     const f = h("div", { class: "fields", style: "margin-top:12px" });
     const inp = (v, w = 90) => h("input", { type: "text", value: v ?? "", style: `width:${w}px` });
     const slotI = inp(st.slot, 60), volI = inp(st.volume, 60), bpmI = inp(st.bpm, 70), offI = inp(st.offset, 80), lsI = inp(st.loopStart, 110);
-    const fastC = h("input", { type: "checkbox" }), loopC = h("input", { type: "checkbox", checked: st.loop });
+    const fastC = h("input", { type: "checkbox", checked: st.fast }), loopC = h("input", { type: "checkbox", checked: st.loop });
     const label = h("span", { class: "mono" });
     const updLabel = () => { label.textContent = `CUSTOM_BGM_${String(+slotI.value || 0).padStart(2, "0")}${fastC.checked ? "_FAST" : ""}`; };
     slotI.oninput = updLabel; fastC.onchange = updLabel; updLabel();
@@ -1077,3 +1079,178 @@ function openAddMusic() {
     if (open && !S.summary.open) await openArchive(open);
   } catch (e) { toast(e.message, "bad"); }
 })();
+
+
+/* ---------------------------------------------------------------- course music: states, beat, loop */
+async function courseCards(sec, meta) {
+  const it = S.item;
+  const holder = h("div", {}, h("div", { class: "card dim" }, "Reading the beat track…"));
+  sec.append(holder);
+  let C;
+  try { C = await api("/api/course", { params: { index: it.index } }); }
+  catch (e) { holder.innerHTML = ""; holder.append(h("div", { class: "card dim" }, "No beat track to edit: " + e.message)); return; }
+  if (!document.body.contains(holder)) return;
+  holder.innerHTML = "";
+  holder.append(statesCard(C), beatCard(C, meta));
+}
+
+function statesCard(C) {
+  const it = S.item;
+  const card = h("div", { class: "card" }, h("h3", {}, "States"),
+    h("p", { class: "help" }, C.custom
+      ? "Like the game's songs: the song plays normally, the Yoshi layer is added on top while Mario rides Yoshi, and the hurry version plays when time runs low. Layers must have the song's length and sample rate; they loop with it."
+      : "The game's layers for this song. Replace one with a WAV of the same length to change what that state plays."));
+  const t = h("table", { class: "t" }, h("tr", {}, ...["State", "Track", "Layer", ""].map(x => h("th", {}, x))));
+  const tracks = C.custom ? [1, 2] : [...new Set([1, 2, 3, ...C.layers.map(l => l.track)])].sort();
+  const reload = async () => { await refresh(true); select("sound", it.index, "player"); };
+  const layerAction = (track, remove) => guard(async () => {
+    if (remove && !confirm("Remove the Yoshi layer? (Nothing is written until you save.)")) return;
+    const r = await api("/api/course/layer", { method: "POST", body: { index: it.index, track, remove: !!remove } });
+    if (r && r.cancelled) return;
+    toast(remove ? "Layer removed" : "Layer set", "good"); S.summary.dirty = true; reload();
+  });
+  for (const tr of tracks) {
+    const l = C.layers.find(x => x.track === tr);
+    const role = { 1: "Normal", 2: "Riding Yoshi", 3: "Third layer (the game keeps it silent)" }[tr] || `Track ${tr}`;
+    const info = l ? `${l.warcLabel || "wave archive " + l.warcIndex} #${l.wave} · ${(l.seconds || 0).toFixed(1)} s · ${l.rate} Hz${l.loop ? ` · loops from ${(l.loopStart || 0).toFixed(2)} s` : ""}` : "none";
+    const btns = h("div", { class: "states" });
+    if (l) btns.append(h("button", { class: "btn small", onclick: guard(() => preview(audioUrl("/api/wave", { warc: l.warcIndex, wave: l.wave }))) }, "▶"));
+    if (l) btns.append(h("button", { class: "btn small", onclick: layerAction(tr) }, "Replace…"));
+    if (!l && C.custom && tr === 2) btns.append(h("button", { class: "btn small accent", onclick: layerAction(tr) }, "Add Yoshi layer…"));
+    if (l && C.custom && tr === 2) btns.append(h("button", { class: "btn small danger", onclick: layerAction(tr, true) }, "Remove"));
+    t.append(h("tr", {}, h("td", {}, role), h("td", { class: "dim" }, tr), h("td", { class: l ? "" : "dim" }, info), h("td", {}, btns)));
+  }
+  const hurry = h("div", { class: "states" });
+  if (C.pair) hurry.append(h("a", { onclick: () => select("sound", C.pair.index, "player") }, C.pair.label));
+  else if (C.custom && !C.fast) {
+    const slot = parseInt(C.label.slice(11, 13), 10);
+    hurry.append(h("span", { class: "dim" }, "none "), h("button", { class: "btn small accent", onclick: () => openAddMusic({ slot, fast: true }) }, "Add hurry version…"));
+  } else hurry.append(h("span", { class: "dim" }, "none"));
+  t.append(h("tr", {}, h("td", {}, C.fast ? "Normal version" : "Time running low"), h("td", { class: "dim" }, "—"), h("td", {}, hurry), h("td", {})));
+  card.append(t);
+  return card;
+}
+
+function beatCard(C, meta) {
+  const it = S.item;
+  const st = { events: C.events.map(e => e.slice()), loopStart: C.loop[0], loopEnd: C.loop[1], tool: "seek", kind: 3, accent: 2,
+    snap: true, dirty: false, moveWaves: true };
+  const spt = C.spt, tb = C.timebase;
+  const card = h("div", { class: "card" }, h("h3", {}, "Beat, bahs and loop"));
+  card.append(h("p", { class: "help" }, `Tempo ${C.tempo} BPM, ${tb} ticks a beat. Variable 1 is the beat accent (the enemies nod: 3 on the bar-pair downbeat, 2 and 1 in between), variable 0 the bah (they hop: 3 single, 1 then 4 for a bah-bah, 2 the underground's).`));
+  const tools = h("div", { class: "states" }, h("span", { class: "dim" }, "Click tool:"));
+  const mk = (t, name) => { const b = h("button", { class: "btn small tool" + (st.tool === t ? " on" : ""), onclick: () => { st.tool = t; $$(".tool", tools).forEach(x => x.classList.toggle("on", x === b)); } }, name); return b; };
+  const kindSel = h("select", {}, ...[[3, "bah 3 · single"], [1, "bah 1 · first of two"], [4, "bah 4 · second of two"], [2, "bah 2 · underground"]].map(([v, n]) => h("option", { value: v }, n)));
+  const accSel = h("select", {}, ...[[3, "accent 3"], [2, "accent 2"], [1, "accent 1"]].map(([v, n]) => h("option", { value: v, selected: v === 2 }, n)));
+  kindSel.onchange = () => st.kind = +kindSel.value; accSel.onchange = () => st.accent = +accSel.value;
+  const snapC = h("input", { type: "checkbox", checked: true }); snapC.onchange = () => st.snap = snapC.checked;
+  tools.append(mk("seek", "Seek"), mk("bah", "Add bah"), kindSel, mk("accent", "Add accent"), accSel, mk("ls", "Loop start"), mk("le", "Loop end"),
+    h("label", { class: "chk" }, snapC, "Snap to 1/4 beat"));
+  const wrap = h("div", { class: "wave-wrap", style: "margin-top:8px" }); const cv = h("canvas", { height: 150 }); wrap.append(cv);
+  const lsI = h("input", { type: "text", style: "width:90px" }), leI = h("input", { type: "text", style: "width:90px" });
+  const noLoop = h("input", { type: "checkbox" }), moveC = h("input", { type: "checkbox", checked: true });
+  moveC.onchange = () => st.moveWaves = moveC.checked;
+  const status = h("span", { class: "dim" });
+  const apply = h("button", { class: "btn accent small", disabled: true }, "Apply"), revert = h("button", { class: "btn small", disabled: true }, "Revert");
+  const list = h("div", { class: "bah-list" });
+  const fill = h("button", { class: "btn small" }, "Fill accents from the tempo"), clearA = h("button", { class: "btn small danger" }, "Clear accents"),
+    clearB = h("button", { class: "btn small danger" }, "Clear bahs");
+  card.append(tools, wrap,
+    h("div", { class: "help", style: "margin-top:4px" }, "While playing: ", h("span", { class: "kbd" }, "B"), " bah here, ", h("span", { class: "kbd" }, "N"), " accent here. Right-click a marker to remove it."),
+    h("div", { class: "fields", style: "margin-top:10px" },
+      h("label", {}, "Loop"), h("div", { class: "field-row" }, lsI, h("span", { class: "dim" }, "to"), leI, h("span", { class: "dim" }, "seconds"),
+        h("label", { class: "chk" }, noLoop, "Plays once"), h("label", { class: "chk" }, moveC, "Move the layers' wave loops too")),
+      h("label", {}, "Bahs"), list,
+      h("label", {}, "Accents"), h("div", { class: "field-row" }, fill, clearA, clearB)),
+    h("div", { class: "seq-bar", style: "margin-top:10px" }, apply, revert, status));
+
+  const X = sec => sec / Math.max(meta.length, st.loopEnd * spt) * cv.width;
+  const toTick = sec => { let t = Math.max(0, Math.round(sec / spt)); if (st.snap) { const q = tb / 4; t = Math.round(t / q) * q; } return t; };
+  const touch = () => { st.dirty = true; apply.disabled = revert.disabled = false; status.textContent = "not applied yet"; draw(); drawList(); };
+  function draw(p = Audio.position()) {
+    const W = cv.width = wrap.clientWidth * devicePixelRatio, H = cv.height = 150 * devicePixelRatio;
+    cv.style.width = "100%"; cv.style.height = "150px";
+    const g = cv.getContext("2d"); g.clearRect(0, 0, W, H);
+    const total = Math.max(meta.length, st.loopEnd * spt);
+    const x = sec => sec / total * W;
+    if (st.loopStart != null) { g.fillStyle = "rgba(69,196,134,.08)"; g.fillRect(x(st.loopStart * spt), 0, x(st.loopEnd * spt) - x(st.loopStart * spt), H); }
+    const all = mixPeaks(meta.peaks, () => true), n = all.length, scale = meta.length / total;
+    g.fillStyle = "#33405e";
+    for (let i = 0; i < n; i++) { const a = all[i] * H * .35; g.fillRect(i / n * W * scale, H * .5 - a, Math.max(1, W * scale / n), a * 2); }
+    for (let tick = 0; tick * spt < total; tick += tb) {
+      const bar = (tick / tb) % 4 === 0; g.fillStyle = bar ? "rgba(255,255,255,.14)" : "rgba(255,255,255,.05)";
+      g.fillRect(x(tick * spt), 0, 1, H);
+    }
+    for (const [tick, v, val] of st.events) {
+      const X0 = x(tick * spt);
+      if (v === 1) { g.fillStyle = "#5aa9ff"; const hh = (6 + val * 7) * devicePixelRatio; g.fillRect(X0 - 1, H - hh, 3, hh); }
+      else { g.fillStyle = "#ffb02e"; g.beginPath(); g.moveTo(X0 - 7, 0); g.lineTo(X0 + 7, 0); g.lineTo(X0, 13 * devicePixelRatio); g.fill(); g.fillRect(X0 - .5, 0, 1, H * .7);
+        g.font = `${11 * devicePixelRatio}px Segoe UI`; g.fillText(val, X0 + 4, 25 * devicePixelRatio); }
+    }
+    if (st.loopStart != null) { g.fillStyle = "#45c486"; g.fillRect(x(st.loopStart * spt), 0, 2, H); }
+    g.fillStyle = "#ff6464"; g.fillRect(x(st.loopEnd * spt) - 2, 0, 2, H);
+    if (Audio.label === it.label) { g.fillStyle = "#fff"; g.fillRect(x(p), 0, 2, H); }
+    lsI.value = st.loopStart == null ? "" : (st.loopStart * spt).toFixed(3); leI.value = (st.loopEnd * spt).toFixed(3);
+    noLoop.checked = st.loopStart == null; lsI.disabled = st.loopStart == null;
+  }
+  function drawList() {
+    list.innerHTML = "";
+    const bahs = st.events.map((e, i) => [e, i]).filter(([e]) => e[1] === 0).sort((a, b) => a[0][0] - b[0][0]);
+    if (!bahs.length) list.append(h("span", { class: "help" }, "No bahs: the enemies only nod. Use Add bah, or press B while it plays."));
+    for (const [e, i] of bahs) {
+      const sel = h("select", {}, ...[1, 2, 3, 4].map(v => h("option", { value: v, selected: v === e[2] }, v)));
+      sel.onchange = () => { e[2] = +sel.value; touch(); };
+      list.append(h("span", { class: "bah" }, `${(e[0] * spt).toFixed(2)}s `, sel, h("button", { onclick: () => { st.events.splice(i, 1); touch(); } }, "×")));
+    }
+    const acc = st.events.filter(e => e[1] === 1).length;
+    fill.title = `${acc} accents now`;
+  }
+  const timeAt = e => { const r = wrap.getBoundingClientRect(); return (e.clientX - r.left) / r.width * Math.max(meta.length, st.loopEnd * spt); };
+  wrap.onclick = e => {
+    const sec = timeAt(e);
+    if (st.tool === "bah") { st.events.push([toTick(sec), 0, st.kind]); touch(); }
+    else if (st.tool === "accent") { st.events.push([toTick(sec), 1, st.accent]); touch(); }
+    else if (st.tool === "ls") { const t = toTick(sec); if (t < st.loopEnd) { st.loopStart = t; touch(); } }
+    else if (st.tool === "le") { const t = toTick(sec); if (t > (st.loopStart ?? 0)) { st.loopEnd = t; touch(); } }
+    else if (Audio.label === it.label) { Audio.playing ? Audio.play(sec) : (Audio.offset = sec, Audio.ui()); }
+  };
+  wrap.oncontextmenu = e => {
+    e.preventDefault();
+    const sec = timeAt(e), tol = 8 / wrap.clientWidth * Math.max(meta.length, st.loopEnd * spt);
+    let best = -1, d = 1e9;
+    st.events.forEach((ev, i) => { const dd = Math.abs(ev[0] * spt - sec); if (dd < d) { d = dd; best = i; } });
+    if (best >= 0 && d <= tol) { st.events.splice(best, 1); touch(); }
+  };
+  lsI.onchange = () => { const t = toTick(+lsI.value || 0); if (t < st.loopEnd) st.loopStart = t; touch(); };
+  leI.onchange = () => { const t = toTick(+leI.value || 0); if (t > (st.loopStart ?? 0)) st.loopEnd = t; touch(); };
+  noLoop.onchange = () => { st.loopStart = noLoop.checked ? null : 0; touch(); };
+  fill.onclick = () => {
+    const firstAcc = st.events.filter(e => e[1] === 1).map(e => e[0]).sort((a, b) => a - b)[0] ?? 0;
+    st.events = st.events.filter(e => e[1] !== 1);
+    for (let k = firstAcc; k < st.loopEnd; k += 8 * tb) for (const [o, v] of [[0, 3], [4 * tb, 2], [6 * tb, 2]]) if (k + o < st.loopEnd) st.events.push([k + o, 1, v]);
+    touch();
+  };
+  clearA.onclick = () => { st.events = st.events.filter(e => e[1] !== 1); touch(); };
+  clearB.onclick = () => { st.events = st.events.filter(e => e[1] !== 0); touch(); };
+  revert.onclick = () => { st.events = C.events.map(e => e.slice()); st.loopStart = C.loop[0]; st.loopEnd = C.loop[1]; st.dirty = false; apply.disabled = revert.disabled = true; status.textContent = ""; draw(); drawList(); };
+  apply.onclick = guard(async () => {
+    apply.disabled = true;
+    const r = await api("/api/course/beat", { method: "POST", body: { index: it.index, events: st.events, loopStart: st.loopStart, loopEnd: st.loopEnd, moveWaves: st.moveWaves } });
+    S.summary.dirty = true;
+    toast(`Beat track written: ${r.events} events${r.waves.length ? `, ${r.waves.length} wave loop(s) moved` : ""}. Rendering again…`, "good");
+    $$(".tab").forEach(x => x.dataset.for = "");
+    await doRender($("#tab-player"));
+  });
+  const onKey = e => {
+    if (!document.body.contains(card)) { document.removeEventListener("keydown", onKey); return; }
+    if (e.target.matches("input, textarea, select") || Audio.label !== it.label || !Audio.playing) return;
+    const k = e.key.toLowerCase();
+    if (k === "b") { st.events.push([toTick(Audio.position()), 0, st.kind]); touch(); }
+    if (k === "n") { st.events.push([toTick(Audio.position()), 1, st.accent]); touch(); }
+  };
+  document.addEventListener("keydown", onKey);
+  const tick = p => { if (!document.body.contains(card)) { Audio.onTick = Audio.onTick.filter(f => f !== tick); return; } draw(p); };
+  Audio.onTick = Audio.onTick.filter(f => !f.beat).concat(Object.assign(tick, { beat: true }));
+  requestAnimationFrame(() => { draw(); drawList(); });
+  return card;
+}

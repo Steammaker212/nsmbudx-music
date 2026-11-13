@@ -571,6 +571,41 @@ def add_music(bf, label, fwav, bpm, volume=None, offset=0.0, bahs=None, yoshi=No
     return set_custom_music(bf, music + [(label, fwav, bpm, volume, offset, seq, yoshi, flags)])
 
 
+def set_custom_layer(bf, label, layer, fwav):
+    """Archive bytes with one layer of added music replaced: "song" (track 1) or "yoshi"
+    (track 2; None removes it). The beat track keeps its bahs, accents and loop."""
+    from . import beat
+    music = custom_music(bf)
+    i = next((k for k, m in enumerate(music) if m[0] == label), None)
+    if i is None:
+        raise ValueError(f"{label} is not added music")
+    _, song, bpm, volume, offset, _, yoshi, flags = music[i]
+    sound = next(s for s in bf.sounds if s.label == label)
+    old = beat.read_beat(bf, sound)
+    if layer == "song":
+        if fwav is None:
+            raise ValueError("a song needs its song layer; remove the song instead")
+        song = fwav
+    elif layer == "yoshi":
+        yoshi = fwav
+    else:
+        raise ValueError(f"no layer {layer}")
+    info = F.fwav_info(song)
+    if yoshi is not None:
+        yi = F.fwav_info(yoshi)
+        if (yi["samples"], yi["rate"]) != (info["samples"], info["rate"]):
+            raise ValueError("the Yoshi layer must have the song's length and sample rate")
+    length = info["samples"] / info["rate"]
+    loop = info["loop_start"] / info["rate"] if info["loop"] else None
+    seq, start = build_beat_seq(label, bpm, length, loop, offset, None, yoshi is not None)
+    tick = lambda sec: round(sec * bpm * TIMEBASE / 60)
+    end = max(tick(length), 1)
+    seq = beat.write_beat(seq, start, bpm, TIMEBASE, [e for e in old["events"] if e[0] < end],
+                          None if loop is None else tick(loop), end)
+    music[i] = (label, song, bpm, volume, offset, seq, yoshi, flags)
+    return set_custom_music(bf, music)
+
+
 def remove_music(bf, label):
     music = custom_music(bf)
     if label not in [m[0] for m in music]:
