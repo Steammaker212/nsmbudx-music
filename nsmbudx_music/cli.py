@@ -14,13 +14,17 @@ reverse-engineering/FindingsI/AUDIO.md):
     python -m nsmbudx_music <Sound.bfsar> inject <label> <layer|all> <in.wav|in.bfwav>
                             -o <out.bfsar> [--loop-start SAMPLES | --no-loop] [--silence-others]
     python -m nsmbudx_music <Sound.bfsar> add <slot> <in.wav> -o <out.bfsar> [--fast] [--bpm N] [--offset S] [--bahs FILE]
+                            [--yoshi YOSHI.wav]
     python -m nsmbudx_music <Sound.bfsar> remove <slot> -o <out.bfsar>
+    python -m nsmbudx_music <Sound.bfsar> render <label> <out.wav> [--mute 2,3]
+    python -m nsmbudx_music <Sound.bfsar> seq <label|file id> <out.txt>   # sequence as text
+    python -m nsmbudx_music <Sound.bfsar> seqin <file id> <in.txt> -o <out.bfsar>
     python -m nsmbudx_music <Sound.bfsar> dump <out_dir>      # every table as CSV
 """
 import argparse, os, re, sys
 from .bfsar import Bfsar, dump_csv, summary
 from . import edit, formats as F, fwav
-from .audio import estimate_beat, read_wav, silent_wave, wav_to_fwav, write_wav
+from .audio import estimate_beat, match_length, pcm_to_fwav, read_wav, silent_wave, wav_to_fwav, write_wav
 
 # SndBgmMgr course music tables in main v1.0.0 (32-bit): {name, id} x 30, 1-based.
 # 0x60c28460 normal, 0x60c28370 _FAST, 0x60c28640 control _V, 0x60c28550 control _FAST_V.
@@ -177,25 +181,85 @@ def cmd_inject(m, label, layer, src, out, loop_start, no_loop, silence_others):
     print(f"wrote {out} ({len(data):,} bytes)")
 
 
-def cmd_add(m, name, src, out, fast, bpm, offset, bahs, loop_start, no_loop, volume):
+def cmd_add(m, name, src, out, fast, bpm, offset, bahs, loop_start, no_loop, volume, yoshi=None):
     label = edit.custom_label(name, fast)
-    if src.lower().endswith(".bfwav"):
-        blob = load_input(src, None, False)
-        rate_bpm, offset = bpm or 120, offset or 0.0
-    else:
-        blob, pcm, rate = wav_to_fwav(src, loop_start, not no_loop)
-        found_bpm, found_offset = estimate_beat(pcm, rate, bpm)
-        rate_bpm = bpm or found_bpm
-        offset = found_offset if offset is None else offset
+    pad, yblob = 0.0, None
     if bahs:
         with open(bahs, encoding="utf-8-sig") as f:
             bahs = edit.parse_bahs(f.read())
         print(f"{len(bahs)} bahs from the file")
-    data = edit.add_music(m.bf, label, blob, rate_bpm, volume, offset, bahs or None)
+    if src.lower().endswith(".bfwav"):
+        blob = load_input(src, None, False)
+        rate_bpm, offset = bpm or 120, offset or 0.0
+        if yoshi:
+            yblob = load_input(yoshi, None, False)
+    else:
+        pcm, rate, wav_loop = read_wav(src)
+        ls = loop_start if loop_start is not None else wav_loop
+        blob, used, _ = pcm_to_fwav(pcm, rate, ls, not no_loop)
+        found_bpm, found_offset = estimate_beat(pcm, rate, bpm)
+        rate_bpm = bpm or found_bpm
+        offset = found_offset if offset is None else offset
+        pad = (len(used) - len(pcm)) / rate     # silence put in front so the loop starts on a frame
+        if yoshi:
+            ypcm, yrate, _ = read_wav(yoshi)
+            if yrate != rate:
+                sys.exit(f"the Yoshi layer is {yrate} Hz and the song {rate} Hz: use the same rate")
+            yblob = pcm_to_fwav(match_length(ypcm, pcm), rate, ls, not no_loop)[0]
+    if bahs:
+        bahs = [(t + pad, k) for t, k in bahs]
+    data = edit.add_music(m.bf, label, blob, rate_bpm, volume, offset + pad, bahs or None, yblob)
     with open(out, "wb") as f:
         f.write(data)
     print(f"{label}: {os.path.basename(src)}, {rate_bpm} BPM, first beat {offset:.3f} s -> {out} "
           f"({len(data):,} bytes)")
+
+
+def cmd_render(m, label, out, mute):
+    from . import render
+    s = next((s for s in m.bf.sounds if s.label == label), None)
+    if s is None:
+        sys.exit(f"no sound {label}")
+    r = render.render(m.bf, s)
+    with open(out, "wb") as f:
+        f.write(render.to_wav(r.mix({int(t) for t in mute.split(",") if t}), r.rate))
+    loop = f", loops {r.loop[0]:.2f}-{r.loop[1]:.2f} s" if r.loop else ""
+    print(f"{label}: {r.length:.1f} s, tracks {sorted(r.tracks)}{loop} -> {out}")
+
+
+def cmd_seq(m, target, out):
+    from . import seq
+    fid = int(target) if target.isdigit() else next((s.file_id for s in m.bf.sounds if s.label == target), None)
+    blob = m.bf.file_bytes(fid) if fid is not None else None
+    if not blob or blob[:4] != b"FSEQ":
+        sys.exit(f"{target}: not a sequence")
+    with open(out, "w", encoding="utf-8", newline="\n") as f:
+        f.write(f"; file {fid}\n" + seq.disassemble(blob).text)
+    print(f"file {fid} -> {out}")
+
+
+def cmd_seqin(m, fid, src, out):
+    from . import seq
+    ed = edit.Editor(m.bf)
+    old = ed.files[fid]
+    with open(src, encoding="utf-8") as f:
+        try:
+            new = seq.compile_text(f.read(), old)
+        except seq.AsmError as e:
+            sys.exit(f"{src}: {e}")
+    old_labels, new_labels = F.fseq_labels(old), F.fseq_labels(new)
+    from . import info
+    for i, s in enumerate(m.bf.sounds):        # sounds starting at a label follow it
+        if s.file_id == fid:
+            start = s.detail["seq_opts"].get(0, 0)
+            name = next((n for n, o in old_labels.items() if o == start), None)
+            if name in new_labels and new_labels[name] != start:
+                info.set_field(ed, "sound", i, "start_offset", new_labels[name])
+    ed.files[fid] = new
+    data = ed.build()
+    with open(out, "wb") as f:
+        f.write(data)
+    print(f"file {fid}: {len(new)} bytes -> {out}")
 
 
 def cmd_remove(m, name, out):
@@ -226,10 +290,18 @@ def main():
     p.add_argument("--offset", type=float, help="seconds to the song's first beat (default: estimated)")
     p.add_argument("--bahs", help="text file of times (seconds [kind]) for the enemies' hops, "
                                   "or an Audacity label export (default: every fourth bar)")
+    p.add_argument("--yoshi", help="a second WAV of the same length: the layer the game adds while "
+                                   "Mario rides Yoshi")
     p.add_argument("--volume", type=int, help="0-255 (default 80, like the overworld music)")
     p.add_argument("--loop-start", type=int); p.add_argument("--no-loop", action="store_true")
     p = sub.add_parser("remove", help="remove added music"); p.add_argument("slot")
     p.add_argument("-o", "--out", required=True)
+    p = sub.add_parser("render", help="play a sequence or wave sound into a WAV, as the game would")
+    p.add_argument("label"); p.add_argument("out")
+    p.add_argument("--mute", default="", help="tracks to leave out, e.g. 2,3 (course music: 2 is the Yoshi layer)")
+    p = sub.add_parser("seq", help="write a sequence file as text"); p.add_argument("target"); p.add_argument("out")
+    p = sub.add_parser("seqin", help="assemble sequence text back into the archive")
+    p.add_argument("file", type=int); p.add_argument("input"); p.add_argument("-o", "--out", required=True)
     a = ap.parse_args()
     m = Music(a.bfsar)
     if a.cmd == "list":
@@ -240,8 +312,14 @@ def main():
     elif a.cmd == "extract":
         cmd_extract(m, a.out, a.regex, a.wav)
     elif a.cmd == "add":
-        cmd_add(m, a.slot, a.input, a.out, a.fast, a.bpm, a.offset, a.bahs, a.loop_start, a.no_loop, a.volume)
+        cmd_add(m, a.slot, a.input, a.out, a.fast, a.bpm, a.offset, a.bahs, a.loop_start, a.no_loop, a.volume, a.yoshi)
     elif a.cmd == "remove":
         cmd_remove(m, a.slot, a.out)
+    elif a.cmd == "render":
+        cmd_render(m, a.label, a.out, a.mute)
+    elif a.cmd == "seq":
+        cmd_seq(m, a.target, a.out)
+    elif a.cmd == "seqin":
+        cmd_seqin(m, a.file, a.input, a.out)
     else:
         cmd_inject(m, a.label, a.layer, a.input, a.out, a.loop_start, a.no_loop, a.silence_others)

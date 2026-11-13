@@ -113,15 +113,30 @@ def wav_to_fwav(path, loop_start=None, loop=True, log=print):
     padding the song's start with up to 13 samples of silence.
     """
     pcm, rate, wav_loop = read_wav(path)
+    return pcm_to_fwav(pcm, rate, loop_start if loop_start is not None else wav_loop, loop, log)
+
+
+def pcm_to_fwav(pcm, rate, loop_start=None, loop=True, log=print):
+    """FWAV bytes from int16 (samples, channels): see wav_to_fwav."""
     ls = None
     if loop:
-        ls = loop_start if loop_start is not None else (wav_loop or 0)
+        ls = loop_start or 0
     if ls and ls % 14:
         pad = 14 - ls % 14
         pcm = np.concatenate([np.zeros((pad, pcm.shape[1]), np.int16), pcm])
         ls += pad
     log(f"encoding {pcm.shape[0]} samples x {pcm.shape[1]} ch @ {rate} Hz, loop {ls}")
     return fwav.Wave.from_pcm(pcm, rate, ls).build(), pcm, rate
+
+
+def match_length(pcm, ref):
+    """`pcm` cut or padded with silence to `ref`'s length, with `ref`'s channel count."""
+    if pcm.shape[1] != ref.shape[1]:
+        pcm = np.repeat(pcm[:, :1], ref.shape[1], axis=1)
+    pcm = pcm[:len(ref)]
+    if len(pcm) < len(ref):
+        pcm = np.concatenate([pcm, np.zeros((len(ref) - len(pcm), ref.shape[1]), pcm.dtype)])
+    return pcm
 
 
 def silent_wave(rate, channels):

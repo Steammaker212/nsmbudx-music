@@ -27,6 +27,12 @@ HOME_GROUP = "GROUP_BOOT"
 # template for new music: a course music sequence and its bank
 TEMPLATE = "STRM_BGM_CHIJOU"
 LOAD_ALL = 0xFFFFFFFF      # group item load flags: sequence, bank and wave archive
+# User param 0 of added music: the BPM in the low 16 bits (the game reads the tempo from
+# them, and its beat length from the low 10), song flags for the Custom Music sprite above.
+# The game's other readers use bits 0-7 (sound effect handles) and 31 (GamePad speaker).
+SONG_YOSHI = 1 << 24       # track 2 holds a Yoshi layer: keep the song while riding Yoshi
+SONG_BAHS = 1 << 25        # the bahs were placed by hand
+BPM_MASK = 0xFFFF
 
 
 def align(n, a):
@@ -135,13 +141,15 @@ class Editor:
 
     # --- new music -------------------------------------------------------
     def add_seq_music(self, label, fwav, bpm, volume=None, offset=0.0, bahs=None, seq=None,
-                      template=TEMPLATE):
+                      yoshi=None, flags=0, template=TEMPLATE):
         """Add `label` as a sequence sound playing `fwav`, like the game's own course music.
 
         Track 0 of the new sequence is a silent beat map at `bpm` (the enemies' "bah"), track 1
         plays the song through a one-wave bank. `offset` is the first beat in seconds,
         `bahs` the hops [(seconds, kind)] (default: every fourth bar). `seq` reuses a beat
-        track built before (from custom_music). Returns the sound id.
+        track built before (from custom_music). `yoshi` is an optional second FWAV of the
+        same length: the Yoshi layer, played on track 2, which the game turns on only while
+        Mario rides Yoshi (SndBgmMgr::changeBgmTrack). Returns the sound id.
         """
         from .fwav import build_fwar
         bf = self.bf
@@ -156,11 +164,13 @@ class Editor:
         loop = info["loop_start"] if info["loop"] else None
         if seq is None:
             seq, start = build_beat_seq(label, bpm, info["samples"] / info["rate"],
-                                        None if loop is None else loop / info["rate"], offset, bahs)
+                                        None if loop is None else loop / info["rate"], offset, bahs,
+                                        yoshi is not None)
         else:
             start = F.fseq_labels(seq)[label]
-        war_file = self.add_file(build_fwar([fwav]))
-        bank_file = self.add_file(self._one_wave_bank(bf.banks[tpl_bank]["file"], war_id))
+        war_file = self.add_file(build_fwar([fwav] if yoshi is None else [fwav, yoshi]))
+        bank_file = self.add_file(self._one_wave_bank(bf.banks[tpl_bank]["file"], war_id,
+                                                      yoshi is not None))
         seq_file = self.add_file(seq)
 
         # wave archive info: file id, not loaded individually, no options (as the game's own)
@@ -183,10 +193,12 @@ class Editor:
         _, boff = struct.unpack_from("<Hxxi", chunk, doff)
         assert struct.unpack_from("<I", chunk, doff + boff)[0] == 1
         struct.pack_into("<I", chunk, doff + boff + 4, bank_id)
-        struct.pack_into("<I", chunk, doff + 8, 0b11)          # tracks 0 and 1
+        struct.pack_into("<I", chunk, doff + 8, 0b111 if yoshi is not None else 0b11)
         self._set_option(chunk, doff + 12, 0, start)           # sequence start offset
         self._set_option(chunk, 20, 0, len(self.strings))
-        self._set_option(chunk, 20, 31, bpm)                   # user param 0: BPM
+        flags |= SONG_YOSHI if yoshi is not None else 0
+        flags |= SONG_BAHS if bahs else 0
+        self._set_option(chunk, 20, 31, (bpm & BPM_MASK) | (flags & ~BPM_MASK & 0x7FFFFFFF))
         self.sections[SOUND].append(bytes(chunk))
         self.add_string(label, sound_id)
 
@@ -208,16 +220,26 @@ class Editor:
         slot = bin(flags & ((1 << bit) - 1)).count("1")
         struct.pack_into("<I", chunk, at + 4 + 4 * slot, value)
 
-    def _one_wave_bank(self, file_id, war_id):
-        """The template bank with every wave id table entry pointing at wave 0 of war_id."""
+    def _one_wave_bank(self, file_id, war_id, yoshi=False):
+        """The template bank with every wave id table entry pointing at wave 0 of war_id,
+        except entry 1 (program 1, the Yoshi layer) at wave 1 when there is one. Programs 0
+        and 1 play at full volume."""
+        from .banks import Bank
         blob = bytearray(self.bf.file_bytes(file_id))
         r, b = R(blob), F.blocks(blob)
         i = b[0x5800][0] + 8
         _, toff = r.ref(i)
         tab = i + toff
         for k in range(r.u32(tab)):
-            struct.pack_into("<II", blob, tab + 4 + 8 * k, war_id, 0)
-        return bytes(blob)
+            struct.pack_into("<II", blob, tab + 4 + 8 * k, war_id, 1 if yoshi and k == 1 else 0)
+        bank = Bank(bytes(blob))
+        for prg in (0, 1):
+            inst = bank.instruments[prg] if prg < len(bank.instruments) else None
+            for kr, keys in enumerate(inst["keys"] if inst else ()):
+                for vr, reg in enumerate(keys["velocity"]):
+                    if "volume" in reg["offsets"]:
+                        bank.set_field(prg, kr, vr, "volume", 127)
+        return bytes(bank.blob)
 
     # --- write -------------------------------------------------------------
     def build_strg(self):
@@ -333,7 +355,7 @@ def _u24(n):
     return n.to_bytes(3, "little")
 
 
-def build_beat_seq(label, bpm, length, loop=None, offset=0.0, bahs=None):
+def build_beat_seq(label, bpm, length, loop=None, offset=0.0, bahs=None, yoshi=False):
     """FSEQ for added music: (file bytes, start offset of `label` in DATA).
 
     Track 0 is silent and only writes BEAT_PATTERN at `bpm` over the song's `length`
@@ -342,6 +364,7 @@ def build_beat_seq(label, bpm, length, loop=None, offset=0.0, bahs=None):
     (variable 0) at those times in the song instead of BEAT_PATTERN's.
     Track 1 plays program 0 note 60 forever (the song itself, through the bank), and
     the start code opens track 1 and runs track 0, like the game's own course music.
+    With `yoshi`, track 2 plays program 1 (the Yoshi layer) the same way.
     """
     if not 1 <= bpm <= 0xFFFF:
         raise ValueError("music needs a tempo (BPM) for the beat track")
@@ -376,8 +399,14 @@ def build_beat_seq(label, bpm, length, loop=None, offset=0.0, bahs=None):
 
     track1 = len(data)
     data += b"\xe1" + struct.pack("<H", bpm) + b"\xb0\x60\x81\x00\x3c\x7f\x00\x89" + _u24(track1)
+    track2 = len(data)
+    if yoshi:
+        data += b"\xe1" + struct.pack("<H", bpm) + b"\xb0\x60\x81\x01\x3c\x7f\x00\x89" + _u24(track2)
     start = len(data)
-    data += b"\x88\x01" + _u24(track1) + b"\x89" + _u24(0)
+    data += b"\x88\x01" + _u24(track1)
+    if yoshi:
+        data += b"\x88\x02" + _u24(track2)
+    data += b"\x89" + _u24(0)
 
     data_block = b"DATA" + struct.pack("<I", align(8 + len(data), 0x20)) + bytes(data)
     data_block += b"\0" * (align(len(data_block), 0x20) - len(data_block))
@@ -488,23 +517,30 @@ def parse_bahs(text):
 
 
 def custom_music(bf):
-    """[(label, fwav bytes, bpm, volume, first beat seconds, beat track FSEQ or None)]
-    of the music added to `bf`."""
+    """[(label, fwav bytes, bpm, volume, first beat seconds, beat track FSEQ or None,
+    Yoshi layer fwav bytes or None)] of the music added to `bf`."""
     out = []
     for s in bf.sounds[VANILLA[SOUND]:]:
         if s.kind == "SEQ":
             bank = bf.banks[s.detail["banks"][0] & 0xFFFFFF]
             war_id, index = F.fbnk_waves(bf.file_bytes(bank["file"]))[0]
             seq = bf.file_bytes(s.file_id)
-            offset = beat_offset(seq, s.options.get(31, 120))
+            offset = beat_offset(seq, s.options.get(31, 120) & BPM_MASK)
         elif s.kind == "WSD":      # added by older versions
             war_id, index = F.fwsd_sound_waves(bf.file_bytes(s.file_id), s.detail["index"])[0]
             offset, seq = 0.0, None
         else:
             continue
         war = bf.file_bytes(bf.wavearcs[war_id & 0xFFFFFF]["file"])
-        off, size = F.fwar_entries(war)[index]
-        out.append((s.label, war[off:off + size], s.options.get(31, 0) or 120, s.volume, offset, seq))
+        entries = F.fwar_entries(war)
+        off, size = entries[index]
+        yoshi = None
+        if s.kind == "SEQ" and len(entries) > 1:
+            yo, ys = entries[1]
+            yoshi = war[yo:yo + ys]
+        param = s.options.get(31, 0)
+        out.append((s.label, war[off:off + size], (param & BPM_MASK) or 120, s.volume, offset, seq,
+                    yoshi, param & ~BPM_MASK & 0x7FFFFFFF))
     return out
 
 
@@ -512,20 +548,27 @@ def set_custom_music(bf, music):
     """Archive bytes with exactly `music` (as custom_music gives it) as the added music."""
     ed = Editor(bf)
     ed.truncate_to_vanilla()
-    for label, fwav, bpm, volume, offset, seq in music:
-        ed.add_seq_music(label, fwav, bpm, volume, offset, seq=seq)
+    for label, fwav, bpm, volume, offset, seq, yoshi, flags in music:
+        ed.add_seq_music(label, fwav, bpm, volume, offset, seq=seq, yoshi=yoshi, flags=flags)
     return ed.build()
 
 
-def add_music(bf, label, fwav, bpm, volume=None, offset=0.0, bahs=None):
+def add_music(bf, label, fwav, bpm, volume=None, offset=0.0, bahs=None, yoshi=None):
     """Archive bytes with `label` added, or replaced if it was added before."""
     music = [m for m in custom_music(bf) if m[0] != label]
     if label in bf.strings and label not in [m[0] for m in custom_music(bf)]:
         raise ValueError(f"{label} is one of the game's own sounds; use inject to replace it")
     info = F.fwav_info(fwav)
+    if yoshi is not None:
+        yi = F.fwav_info(yoshi)
+        if (yi["samples"], yi["rate"], yi["loop"], yi["loop_start"]) != \
+                (info["samples"], info["rate"], info["loop"], info["loop_start"]):
+            raise ValueError("the Yoshi layer must have the song's length, rate and loop")
     seq, _ = build_beat_seq(label, bpm, info["samples"] / info["rate"],
-                            info["loop_start"] / info["rate"] if info["loop"] else None, offset, bahs)
-    return set_custom_music(bf, music + [(label, fwav, bpm, volume, offset, seq)])
+                            info["loop_start"] / info["rate"] if info["loop"] else None, offset, bahs,
+                            yoshi is not None)
+    flags = SONG_BAHS if bahs else 0
+    return set_custom_music(bf, music + [(label, fwav, bpm, volume, offset, seq, yoshi, flags)])
 
 
 def remove_music(bf, label):

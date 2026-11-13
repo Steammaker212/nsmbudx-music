@@ -375,8 +375,8 @@ class App(tk.Tk):
             if s.label in self.custom:
                 old = edit.custom_music(music.bf)
                 # a new song gets a fresh beat track; the others keep theirs
-                return edit.set_custom_music(music.bf, [(l, new, b, v, o, None) if l == s.label else
-                                                        (l, w, b, v, o, q) for l, w, b, v, o, q in old])
+                return edit.set_custom_music(music.bf, [(l, new, b, v, o, None, None, 0) if l == s.label else
+                                                        m[:1] + (w,) + m[2:] for m in old for l, w in [m[:2]]])
             info = F.fwav_info(new)
             plan = [(layer, new)]
             if mute:
