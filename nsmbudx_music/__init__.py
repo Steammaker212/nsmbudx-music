@@ -1,3 +1,3 @@
-"""Read, extract, replace and add the music in New Super Mario Bros. U Deluxe's Sound.bfsar."""
+"""Browse, play, edit and add the music in New Super Mario Bros. U Deluxe's Sound.bfsar."""
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
