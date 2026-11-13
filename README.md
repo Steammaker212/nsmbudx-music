@@ -1,8 +1,9 @@
 # nsmbudx-music
 
-List, extract, replace and **add** music in *New Super Mario Bros. U Deluxe* (Switch,
-v1.0.0), from the command line or a small editor window. Works directly on the game's
-`romfs/Sound/Sound.bfsar`: no hard-coded offsets, and a new song can be any length.
+A sound archive studio for *New Super Mario Bros. U Deluxe* (Switch, v1.0.0): browse,
+play and edit everything in the game's `romfs/Sound/Sound.bfsar`, and **add** your own
+course music, with a Yoshi layer and enemies that dance to your beat. Works directly
+on the archive: no hard-coded offsets, and a new song can be any length.
 
 Added music plays in levels through the Custom Music sprite (785) of
 [nsmbud-reverse](https://github.com/Steammaker212/nsmbud-reverse), with rules such as
@@ -39,6 +40,37 @@ The [releases page](https://github.com/Steammaker212/nsmbudx-music/releases) has
 below) for Windows. Nothing to install: the commands below work the same with
 `nsmbudx-music-cli.exe` in place of `python -m nsmbudx_music`.
 
+## The Studio
+
+`nsmbudx-music.exe` (or `python -m nsmbudx_music.studio [Sound.bfsar]`) opens the
+Studio in its own window (Microsoft Edge's app mode; `--browser` uses your default
+browser instead). Everything runs on your PC; the page talks only to a local server
+on 127.0.0.1.
+
+- **Browse** every sound, sound set, bank, wave archive, group, player and file, with
+  search. Course music is named by course (Overworld, Underground, ...).
+- **Play** any sequence or wave sound, rendered the way the game builds it: the
+  sequence runs tick by tick through its banks and waves, with the game's envelopes.
+  The player shows the loop, the tracks (mute or solo each stem, or pick a game state:
+  normal or riding Yoshi), the notes, and the sequence variables as they change, with
+  the bahs and beat marked and a little critter dancing along.
+- **Properties**: every field of every item (volume, player, priorities, pan, user
+  params, 3D, banks, track flags, start offset, load flags, player limits, ...).
+- **Sequence editor**: the sequence as text, following each track while it plays.
+  Edit it and compile it back; sounds that start at a label follow it.
+- **Bank editor**: instruments, key and velocity regions (wave, original key, volume,
+  pan, pitch, attack, decay, sustain, hold, release), with a piano to play them
+  (mouse, or the A-K keys).
+- **Waves**: play, export to WAV and replace any wave of a wave archive.
+- **Groups**: what each group loads, and its load flags.
+- **Hex** view of any file.
+- **Add music**: pick a WAV, then on its waveform set the loop start, the tempo (tap it
+  with T) and first beat, and place the bahs by clicking or by pressing B while it
+  plays. Preview it with beat clicks and bah sounds, hear the loop seam, add an
+  optional Yoshi layer, and add it as `CUSTOM_BGM_nn` (or its `_FAST` version).
+
+Nothing is written until you press **Save** or **Save as**.
+
 ## Setup (from source)
 
 Python 3.10 or newer, and numpy.
@@ -49,13 +81,9 @@ pip install -r requirements.txt
 
 Run everything from this folder as `python -m nsmbudx_music ...`.
 
-## The editor
+## The old editor
 
-```
-python -m nsmbudx_music.gui
-python -m nsmbudx_music.gui Sound.bfsar
-```
-
+The first, simpler editor window is still there (`python -m nsmbudx_music.gui`).
 Open `Sound.bfsar`, then pick a sound (or one of its layers) in the list:
 
 - **Play** decodes it and opens it in your default player. Double-clicking does the same.
@@ -137,8 +165,12 @@ it. Options:
 - `--loop-start`, `--no-loop` and the input formats work as in `inject`.
 - `--volume` is 0-255; the default (80) matches the overworld music.
 
+- `--yoshi FILE` adds a Yoshi layer: a second WAV of the same length and rate that the
+  game plays on top of the song while Mario rides Yoshi (the game's own songs add bongos).
+
 An added song is a sequence sound like the game's course music: a silent beat track
-for the enemies, and the song played through its own bank. It is listed in GROUP_BOOT,
+for the enemies, the song on track 1 and the Yoshi layer on track 2, played through its
+own bank. It is listed in GROUP_BOOT,
 so the game loads it at boot and keeps it in its sound memory. The nsmbud-reverse code
 makes that memory bigger by what you add, taken from the game's other memory, so keep
 added music to a few minutes in total. A 98-second stereo song adds about 5 MB.
@@ -150,13 +182,15 @@ With the nsmbud-reverse mod installed, place a **Custom Music** sprite (785) any
 
 | Setting | |
 |---|---|
-| Slot | 0-99: plays `CUSTOM_BGM_nn` |
-| Keep playing when time runs low | plays `CUSTOM_BGM_nn_FAST` if you added one, else the same song. Off: the area's own hurry-up music |
-| Keep playing while riding Yoshi | off: the area's own music, with Yoshi's drums |
+| Slot | 0-99: plays `CUSTOM_BGM_nn` (the Studio lists each song's slot) |
+| Keep playing when time runs low | keeps the same song. Not needed when you added `CUSTOM_BGM_nn_FAST`: the sprite switches to it by itself. Off, without one: the area's own hurry-up music |
+| Keep playing while riding Yoshi | not needed for a song with a Yoshi layer: it always stays, and the game turns the layer on. Off, without a layer: the area's own music, with Yoshi's drums |
 | Keep playing while carrying a Baby Yoshi | off: the area's own music, with the Baby Yoshi chorus |
 | Event | plays only while this event is on (0 = always) |
 
 When the song should stop (Yoshi, time, event), the area's own music fades in, and back.
+The enemies dance to the song's own beat and bahs. The sprite knows what the song was
+made with from flags the tool stores with it (above the BPM in user param 0).
 
 ### Install
 
@@ -165,6 +199,18 @@ Put the new archive at `romfs/Sound/Sound.bfsar` in a mod:
 - Atmosphère: `atmosphere/contents/0100EA80032EA000/romfs/Sound/Sound.bfsar`
 - Ryujinx: `mods/contents/0100ea80032ea000/<mod name>/romfs/Sound/Sound.bfsar`
 - Yuzu-likes: `load/0100EA80032EA000/<mod name>/romfs/Sound/Sound.bfsar`
+
+### Play, and edit sequences as text
+
+```
+python -m nsmbudx_music Sound.bfsar render STRM_BGM_CHIJOU chijou.wav --mute 2,3
+python -m nsmbudx_music Sound.bfsar seq STRM_BGM_CHIJOU chijou.txt
+python -m nsmbudx_music Sound.bfsar seqin 65 chijou.txt -o Sound.new.bfsar
+```
+
+`render` plays a sequence or wave sound into a WAV as the game would (here the
+overworld without its Yoshi and third layers). `seq` writes a sequence file as text and
+`seqin` assembles it back; every sequence in the game rebuilds byte for byte.
 
 ### Dump every table
 
@@ -199,6 +245,11 @@ Writes `sounds.csv`, `files.csv`, `banks.csv`, `wavearcs.csv`, `groups.csv`,
   the song itself would shout.
 - Course music is loaded into memory rather than streamed. Very long songs may not fit
   the game's sound heap; the original layers are 40-90 s each.
+- Playback in the Studio leaves out vibrato, portamento, filters and effects, and
+  applies volume, pan and pitch-bend changes at the next note. Some sound effects are
+  silent there because the game sets their variables while it plays them.
+- Sequence and bank editing changes values in place; it does not add or remove
+  instruments or regions.
 - Wii U (big-endian) BFWAVs are refused. Convert them first, or give a WAV.
 
 ## Tests

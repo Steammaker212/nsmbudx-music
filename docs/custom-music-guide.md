@@ -149,6 +149,17 @@ The tool prints what it used:
 CUSTOM_BGM_00: YI-Flower.wav, 120 BPM, first beat 0.175 s -> Sound.new.bfsar
 ```
 
+### A Yoshi layer
+
+The game's course songs have a second stem that it fades in while Mario rides Yoshi
+(bongos and percussion). Your song can have one too: make a WAV with only the extra
+part, the same length and sample rate as the song, cut at the same place, and give it
+as the Yoshi layer (Studio: **Choose Yoshi layer**, CLI: `--yoshi`). It loops with the
+song.
+
+A song with a Yoshi layer keeps playing while riding Yoshi without ticking anything on
+the sprite, and the game turns the layer on and off as Mario gets on and off.
+
 ## 5. The hurry-up version
 
 When the timer drops under 100, the game switches to its `_FAST` music. For an added
@@ -157,13 +168,26 @@ song, add a faster version in the same slot with `--fast` (`CUSTOM_BGM_nn_FAST`)
 without changing its pitch (Audacity: Effect > Change Tempo). The overworld goes from
 110 to 132 BPM, 1.2 times as fast. Give the fast version its own BPM: 120 becomes 144.
 
-Without a `_FAST` version, the sprite either keeps the normal song or hands over to
-the area's own hurry-up music, whichever you choose.
+With a `_FAST` version in the archive, the sprite switches to it by itself when time
+runs low. Without one, it either keeps the normal song or hands over to the area's own
+hurry-up music, whichever you choose with the sprite's first tick.
 
 ## 6. Adding the song
 
-Editor: **Open** your `Sound.bfsar`, **Add music**, choose the slot, the WAV and the
-loop and beat settings, then **Save As**. Never overwrite the original dump.
+Studio (`nsmbudx-music.exe`): **Open** your `Sound.bfsar`, **+ Add music**, choose the
+WAV, then on its waveform:
+
+- **Set loop start**: click where the loop body starts (or type the sample number);
+  **Hear the loop seam** plays the end of the file and then the loop start.
+- **Tempo**: the estimate, or ×2 / ÷2, or tap **T** along with the song while it plays.
+- **Set first beat**: click the first downbeat, or press **F** while it plays.
+- **Place bah**: click each shout, or press **B** while it plays; right-click a bah to
+  remove it. The kind list sets the hop for new bahs. **Import Audacity labels** reads a
+  bah times file.
+- **Preview** plays the song with a click on every beat (louder on the bar) and a "bah"
+  sound on every hop, so you can hear whether they line up before adding it.
+
+Then **Add to archive** and **Save as**. Never overwrite the original dump.
 
 CLI:
 
@@ -195,10 +219,10 @@ Each added song is built the way the game builds its own course music:
 
 | Item | Name | What it is |
 |---|---|---|
-| Sound | `CUSTOM_BGM_nn` | a sequence sound, cloned from `STRM_BGM_CHIJOU`. Its user parameter is the BPM, which the game reads for the beat. |
-| Sequence file (FSEQ) | | track 0: the silent beat track (tempo, then `setvar` 0/1 events and waits, then a jump back to the loop point). Track 1: program 0, note 60, held forever. |
+| Sound | `CUSTOM_BGM_nn` | a sequence sound, cloned from `STRM_BGM_CHIJOU`. User parameter 0 holds the BPM in its low 16 bits, which the game reads for the beat, and flags for the Custom Music sprite above them (Yoshi layer, bahs placed by hand). |
+| Sequence file (FSEQ) | | track 0: the silent beat track (tempo, then `setvar` 0/1 events and waits, then a jump back to the loop point). Track 1: program 0, note 60, held forever. Track 2, with a Yoshi layer: program 1 the same way. |
 | Bank | `BANK_CUSTOM_BGM_nn` | a copy of the overworld bank whose instruments all point at the new wave, at its original pitch |
-| Wave archive (FWAR) | | one wave |
+| Wave archive (FWAR) | | the song, and the Yoshi layer as wave 1 |
 | Wave (FWAV) | | the song, DSP-ADPCM, with its loop |
 | GROUP_BOOT | | lists the three new files, the sound and the bank, so the game loads them at boot |
 
