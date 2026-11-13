@@ -189,6 +189,19 @@ WAV, then on its waveform:
 
 Then **Add to archive** and **Save as**. Never overwrite the original dump.
 
+Everything stays editable after adding. Open the song and render it in the **Player**:
+
+- **States** lists the song, the Yoshi layer and the hurry version. Add, replace or
+  remove the Yoshi layer, replace the song, or add the hurry version (it opens the add
+  window with the slot and "hurry-up version" already set).
+- **Beat, bahs and loop**: Add bah / Add accent put markers where you click (snapped to
+  a quarter beat unless you untick it), right-click removes one, the list changes a
+  bah's kind, B and N add them where the music is while it plays, Fill accents rebuilds
+  the 3/2/2 accents from the tempo, and Loop start / Loop end (or the fields) move the
+  loop. Apply writes it and renders again, so you can hear and see the result.
+
+The same editor works on the game's own songs.
+
 CLI:
 
 ```

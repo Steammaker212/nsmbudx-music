@@ -54,6 +54,13 @@ on 127.0.0.1.
   The player shows the loop, the tracks (mute or solo each stem, or pick a game state:
   normal or riding Yoshi), the notes, and the sequence variables as they change, with
   the bahs and beat marked and a little critter dancing along.
+- **States** (course music, the game's and yours): what plays normally, what the game
+  adds while Mario rides Yoshi, the third layer, and the hurry-up version. Play, replace,
+  add or remove each one; an added song gets a Yoshi layer or a hurry version from here.
+- **Beat, bahs and loop** (course music): add, move the kind of, and remove bahs and beat
+  accents on the waveform (or press B / N along with the music), move the loop start and
+  end, or make it play once. Apply rewrites the beat track and moves the layers' wave
+  loops with it; works on the game's songs too.
 - **Properties**: every field of every item (volume, player, priorities, pan, user
   params, 3D, banks, track flags, start offset, load flags, player limits, ...).
 - **Sequence editor**: the sequence as text, following each track while it plays.
