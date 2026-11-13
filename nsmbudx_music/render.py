@@ -112,6 +112,9 @@ class Result:
         self.notes = []           # (time, track, key, velocity, duration)
         self.vars = []            # (time, track, var, value)
         self.steps = []           # (time, track, DATA offset)
+        self.step_ticks = []      # sequencer tick of each step
+        self.var_ticks = []       # sequencer tick of each variable write
+        self.loop_ticks = None    # (start, end) of the beat track's loop in ticks
         self.tempo = []           # (time, bpm, timebase)
 
     def mix(self, mute=()):
@@ -152,7 +155,10 @@ class Sequencer:
             self._banks[i] = banks.Bank(blob) if blob else None
         return self._banks[i]
 
-    def run(self, data, start, bank_ids, max_seconds=MAX_SECONDS, track_flags=None):
+    def run(self, data, start, bank_ids, max_seconds=MAX_SECONDS, track_flags=None, synth=True,
+            beat_loop=False):
+        """Run the sequence. synth=False only sequences (no audio); beat_loop=True takes the
+        loop from track 0's jump even when a held looping wave would define it."""
         res = Result(self.rate)
         player_vars, global_vars = [-1] * 16, [-1] * 16
         tracks = {0: _Track(0, start)}
@@ -238,6 +244,7 @@ class Sequencer:
                     return
                 c = S.decode(data, track.pc)
                 res.steps.append((now, track.no, c.offset))
+                res.step_ticks.append(ticks)
                 track.pc += c.size
                 if c.cond and not track.cmp:
                     continue
@@ -255,10 +262,13 @@ class Sequencer:
                 elif op == 0x89:
                     # the first backward jump of track 0 marks the loop, unless a held
                     # looping wave (course music) already defines it
-                    if c.target < c.offset and track.no == 0 and loop is None and held_loop is None:
-                        t0 = self._first_time(res.steps, 0, c.target)
-                        if t0 is not None:
-                            loop = (t0, now)
+                    if c.target < c.offset and track.no == 0 and loop is None and \
+                            (held_loop is None or beat_loop) and not c.cond:
+                        k = self._first_index(res.steps, 0, c.target)
+                        if k is not None:
+                            # the target runs again in this same tick: the loop ends here
+                            loop = (res.steps[k][0], now)
+                            res.loop_ticks = (res.step_ticks[k], ticks)
                     track.pc = c.target
                 elif op == 0x8a:
                     if len(track.stack) < 3:
@@ -343,6 +353,7 @@ class Sequencer:
                     if ex < 0x90:
                         arr[i] = (arr[i] + 0x8000) % 0x10000 - 0x8000
                         res.vars.append((now, track.no, c.args[0], arr[i]))
+                        res.var_ticks.append(ticks)
             return
 
         while now < max_seconds:
@@ -371,7 +382,7 @@ class Sequencer:
                         v.end = now + 60.0 / (tempo * timebase)
             if loop is not None:
                 break
-            if held_loop is not None and now >= held_loop[1]:
+            if held_loop is not None and now >= held_loop[1] and not beat_loop:
                 loop = held_loop
                 break
             if not any(t.active for t in tracks.values()) and all(voice_done(v) for v in voices):
@@ -382,15 +393,17 @@ class Sequencer:
         if loop is None and held_loop is not None and now >= held_loop[1]:
             loop = held_loop
         res.loop = loop
+        res.ticks = ticks
         end = loop[1] if loop else now
-        self._synth(res, voices, end, tails=loop is None)
+        if synth:
+            self._synth(res, voices, end, tails=loop is None)
         return res
 
     @staticmethod
-    def _first_time(steps, track, offset):
-        for t, tn, off in steps:
+    def _first_index(steps, track, offset):
+        for k, (t, tn, off) in enumerate(steps):
             if tn == track and off == offset:
-                return t
+                return k
         return None
 
     def _synth(self, res, voices, end, tails):
