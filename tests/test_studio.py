@@ -1,4 +1,6 @@
 import os
+import shutil
+import subprocess
 
 import numpy as np
 import pytest
@@ -79,3 +81,13 @@ def test_yoshi_layer(bf):
     with pytest.raises(ValueError):
         short = fwav.Wave.from_pcm(np.zeros((14 * 100, 2), np.int16), 48000, 0, workers=1).build()
         edit.add_music(bf, "CUSTOM_BGM_05", song, bpm=100, yoshi=short)
+
+
+NODE = shutil.which("node") or next((p for p in (r"C:\Program Files\nodejs\node.exe",) if os.path.exists(p)), None)
+
+
+@pytest.mark.skipif(not NODE, reason="Node.js not installed")
+def test_studio_script_parses():
+    app = os.path.join(os.path.dirname(__file__), "..", "nsmbudx_music", "studio", "static", "app.js")
+    r = subprocess.run([NODE, "--check", app], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr

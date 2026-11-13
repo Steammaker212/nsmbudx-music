@@ -245,13 +245,14 @@ async function refresh(keepSel = true) {
   if (!keepSel || !S.sel) showHome();
 }
 const openArchive = guard(async path => {
+  if (!path) toast("Choose the archive in the Open window (check the taskbar if it is behind this one)");
   const r = await api("/api/open", { method: "POST", body: path ? { path } : {} });
   if (r && r.cancelled) return;
   S.sel = null;
   await refresh(false);
   toast("Opened " + S.summary.path.split(/[\\/]/).pop(), "good");
 });
-$("#btn-open").onclick = () => openArchive();
+$("#btn-open").onclick = () => openArchive(null);
 $("#btn-save").onclick = guard(async () => {
   const r = await api("/api/save", { method: "POST", body: { path: S.summary.path, ask: false } });
   if (!r.cancelled) { toast(`Saved ${r.path}`, "good"); refresh(); }
@@ -273,8 +274,20 @@ function showHome() {
     el.append(h("div", { class: "hero" },
       h("h1", {}, "Sound archive studio for NSMBU Deluxe"),
       h("p", {}, "Open the game's romfs/Sound/Sound.bfsar (or a copy) to browse and play every sound, edit sequences, banks, waves and groups, and add your own course music with a Yoshi layer and enemies that dance on your beat."),
-      h("button", { class: "btn accent", onclick: () => openArchive() }, "Open Sound.bfsar…"),
-      h("p", { class: "dim", style: "margin-top:18px" }, `Version ${sm ? sm.version : ""} · your changes are saved only when you press Save.`)));
+      h("button", { class: "btn accent", onclick: () => openArchive() }, "Open Sound.bfsar…")));
+    const pathI = h("input", { type: "text", placeholder: "…or paste the path of Sound.bfsar (or its romfs folder)", style: "flex:1" });
+    const go = () => { if (pathI.value.trim()) openArchive(pathI.value.trim()); };
+    pathI.onkeydown = e => { if (e.key === "Enter") go(); };
+    const card = h("div", { class: "card", style: "max-width:720px;margin:0 auto" },
+      h("div", { class: "field-row" }, pathI, h("button", { class: "btn", onclick: go }, "Open")));
+    el.append(card);
+    api("/api/recent").then(list => {
+      if (!list.length) return;
+      card.append(h("h3", { style: "margin-top:14px" }, "Recent"),
+        ...list.map(r => h("div", { class: "row", style: r.exists ? "" : "opacity:.5", onclick: () => r.exists && openArchive(r.path) },
+          h("div", { class: "l" }, h("div", {}, r.path.split(/[\\/]/).slice(-3).join("\\")), h("div", { class: "k" }, r.path)))));
+    }).catch(() => { });
+    el.append(h("p", { class: "dim", style: "margin-top:18px;text-align:center" }, `Version ${sm ? sm.version : ""} · your changes are saved only when you press Save.`));
     return;
   }
   const c = sm.counts;
@@ -287,8 +300,8 @@ function showHome() {
 
   const cm = h("div", { class: "card" }, h("h3", {}, "Added music"));
   if (!sm.custom.length) cm.append(h("p", { class: "dim" }, "None yet. Added songs play in levels through the Custom Music sprite (785) of the nsmbud-reverse mod."));
-  else cm.append(h("p", { class: "help" }, "Place a Custom Music sprite (785) in each area with the song's slot. The sprite reads the song: it keeps a song with a Yoshi layer while Mario rides Yoshi, plays CUSTOM_BGM_nn_FAST when time runs low if you added one, and the enemies dance to the song's own beat and bahs."));
   else {
+    cm.append(h("p", { class: "help" }, "Place a Custom Music sprite (785) in each area with the song's slot. The sprite reads the song: it keeps a song with a Yoshi layer while Mario rides Yoshi, plays CUSTOM_BGM_nn_FAST when time runs low if you added one, and the enemies dance to the song's own beat and bahs."));
     const t = h("table", { class: "t" }, h("tr", {}, ...["Label", "Length", "BPM", "First beat", "Bahs", "Yoshi layer", "Sprite 785", ""].map(x => h("th", {}, x))));
     for (const m of sm.custom) {
       const it = S.tree.find(x => x.s === "sound" && x.l === m.label);
