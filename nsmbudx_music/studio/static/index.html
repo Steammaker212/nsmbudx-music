@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nsmbudx-music Studio</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23ffb02e'/%3E%3Cpath d='M12 23a3 3 0 1 1-2-2.8V9l11-2v12a3 3 0 1 1-2-2.8V11.4l-7 1.3Z' fill='%23131a29'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="top">
+  <div class="brand"><span class="logo"></span><b>nsmbudx-music</b><span class="dim">Studio</span></div>
+  <div class="actions">
+    <button id="btn-open" class="btn">Open…</button>
+    <button id="btn-save" class="btn" disabled>Save</button>
+    <button id="btn-saveas" class="btn" disabled>Save as…</button>
+    <button id="btn-add" class="btn accent" disabled>+ Add music</button>
+  </div>
+  <div id="archive-name" class="dim ellipsis"></div>
+  <div id="jobs"></div>
+</header>
+
+<aside id="side">
+  <input id="search" type="search" placeholder="Search labels…" autocomplete="off" disabled>
+  <nav id="cats"></nav>
+  <div id="list" class="list"></div>
+</aside>
+
+<main id="main">
+  <div id="home" class="page"></div>
+  <div id="item" class="page hidden">
+    <div class="item-head">
+      <div>
+        <div id="item-title" class="title"></div>
+        <div id="item-sub" class="dim"></div>
+      </div>
+      <nav id="tabs" class="tabs"></nav>
+    </div>
+    <section id="tab-player" class="tab"></section>
+    <section id="tab-properties" class="tab"></section>
+    <section id="tab-sequence" class="tab"></section>
+    <section id="tab-bank" class="tab"></section>
+    <section id="tab-waves" class="tab"></section>
+    <section id="tab-group" class="tab"></section>
+    <section id="tab-hex" class="tab"></section>
+  </div>
+</main>
+
+<footer id="transport">
+  <button id="tp-play" class="round" title="Play / pause (Space)" disabled>&#9654;</button>
+  <button id="tp-stop" class="round" title="Stop" disabled>&#9632;</button>
+  <div class="tp-info">
+    <div id="tp-label" class="ellipsis">Nothing loaded</div>
+    <div class="tp-bar"><div id="tp-fill"></div><div id="tp-loop"></div></div>
+  </div>
+  <div id="tp-time" class="mono">0:00.0 / 0:00.0</div>
+  <label class="chk" title="Loop like the game"><input id="tp-loopon" type="checkbox" checked> Loop</label>
+  <label class="vol" title="Volume">&#128264;<input id="tp-vol" type="range" min="0" max="1" step="0.01" value="0.8"></label>
+</footer>
+
+<div id="modal" class="modal hidden"><div class="modal-box" id="modal-box"></div></div>
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
